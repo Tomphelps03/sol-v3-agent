@@ -34,6 +34,15 @@ function normId(s) {
   return String(s || "").replace(/-/g, "").toLowerCase();
 }
 
+// Ensure a string is a dashed UUID if it's a 32-hex compact id
+function toDashedUuid(s) {
+  const raw = String(s || "").replace(/-/g, "");
+  if (/^[0-9a-fA-F]{32}$/.test(raw)) {
+    return `${raw.slice(0,8)}-${raw.slice(8,12)}-${raw.slice(12,16)}-${raw.slice(16,20)}-${raw.slice(20)}`;
+  }
+  return String(s || "");
+}
+
 // Map a database key to an actual Notion database id
 function getNotionDbId(dbKey) {
   const key = String(dbKey || "").toLowerCase();
@@ -519,7 +528,8 @@ app.post("/upsert_page", async (req, res) => {
         }
       }
 
-      // If any roadmap relation values are still strings after normalization, return a 400 with suggestions
+      // Consider unresolved only if any roadmap relation values remain non-UUID strings
+      const uuidRe = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
       const unresolved = [];
       for (const [k, v] of Object.entries(normalizedFields)) {
         const looksLikeRoadmapProp = String(k).toLowerCase() === "roadmap";
@@ -527,10 +537,12 @@ app.post("/upsert_page", async (req, res) => {
         const isRoadmapRelation =
           (targetDb && ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID)) ||
           looksLikeRoadmapProp;
-        if (isRoadmapRelation) {
-          if (typeof v === "string" || (Array.isArray(v) && v.some(x => typeof x === "string"))) {
-            unresolved.push({ property: k, value: v });
-          }
+        if (!isRoadmapRelation) continue;
+
+        const vals = Array.isArray(v) ? v : [v];
+        const bad = vals.filter(x => typeof x === "string" && !uuidRe.test(toDashedUuid(x)));
+        if (bad.length) {
+          unresolved.push({ property: k, value: v });
         }
       }
       if (unresolved.length) {
@@ -625,7 +637,7 @@ app.post("/upsert_page", async (req, res) => {
           const rel = ids
             .map(v => (typeof v === "string" ? v.trim() : (v && v.id ? String(v.id) : null)))
             .filter(Boolean)
-            .map(id => ({ id }));
+            .map(id => ({ id: toDashedUuid(id) }));
           if (!rel.length) return { skip: true, reason: "invalid_relation" };
           return { value: { relation: rel } };
         }
