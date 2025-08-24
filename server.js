@@ -26,7 +26,13 @@ const NOTION_DATABASE_ID =
 const ROADMAP_DATABASE_ID = process.env.ROADMAP_DATABASE_ID || "";
 const TASK_TRACKER_DATABASE_ID = process.env.TASK_TRACKER_DATABASE_ID || "";
 const SEARCH_API_KEY = process.env.SEARCH_API_KEY || "";
+
 const BASE_URL = process.env.BASE_URL || "";
+
+// Normalize Notion IDs for comparison (strip dashes, lowercase)
+function normId(s) {
+  return String(s || "").replace(/-/g, "").toLowerCase();
+}
 
 // Map a database key to an actual Notion database id
 function getNotionDbId(dbKey) {
@@ -441,11 +447,19 @@ app.post("/upsert_page", async (req, res) => {
         }
         if (!roadmapTitleProp) return null;
 
-        const q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
+        let q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
           filter: { property: roadmapTitleProp, title: { equals: titleStr } },
           page_size: 1
         }, { headers });
-        const match = (q.data?.results || [])[0];
+        let match = (q.data?.results || [])[0];
+        if (!match) {
+          // Fallback to contains (case-insensitive search behavior is Notion-side)
+          q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
+            filter: { property: roadmapTitleProp, title: { contains: titleStr } },
+            page_size: 1
+          }, { headers });
+          match = (q.data?.results || [])[0];
+        }
         return match?.id || null;
       }
 
@@ -453,10 +467,17 @@ app.post("/upsert_page", async (req, res) => {
       // resolve by title(s) to page id(s).
       for (const [k, v] of Object.entries(fields)) {
         const targetDb = relationTargets[k];
-        if (targetDb && targetDb === ROADMAP_DATABASE_ID) {
+        const looksLikeRoadmapProp = String(k).toLowerCase() === "roadmap";
+        const isRoadmapRelation =
+          (targetDb && ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID)) ||
+          looksLikeRoadmapProp;
+
+        if (isRoadmapRelation) {
           if (typeof v === "string") {
             const id = await resolveRoadmapTitleToId(v);
-            if (id) normalizedFields[k] = [id];
+            if (id) {
+              normalizedFields[k] = [id];
+            }
           } else if (Array.isArray(v)) {
             const out = [];
             for (const item of v) {
@@ -467,7 +488,9 @@ app.post("/upsert_page", async (req, res) => {
                 out.push(item.id);
               }
             }
-            if (out.length) normalizedFields[k] = out;
+            if (out.length) {
+              normalizedFields[k] = out;
+            }
           }
         }
       }
