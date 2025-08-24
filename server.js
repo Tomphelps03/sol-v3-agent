@@ -8,23 +8,38 @@ import PDFDocument from "pdfkit";
 import PPTXGenJS from "pptxgenjs";
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(bodyParser.json());
 
+// Serve generated files from ./public/files
+const filesDir = path.join(process.cwd(), "public", "files");
+fs.mkdirSync(filesDir, { recursive: true });
+app.use("/files", express.static(filesDir));
+
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3000;
-const NOTION_KEY = process.env.NOTION_KEY;
-const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
-const SEARCH_API_KEY = process.env.SEARCH_API_KEY;
+// Support both NOTION_KEY and NOTION-KEY (dash variant), plus multiple DB IDs
+const NOTION_KEY = process.env.NOTION_KEY || process.env["NOTION-KEY"] || "";
+const NOTION_DATABASE_ID =
+  process.env.NOTION_DATABASE_ID || process.env.DOCS_DATABASE_ID || "";
+const ROADMAP_DATABASE_ID = process.env.ROADMAP_DATABASE_ID || "";
+const TASK_TRACKER_DATABASE_ID = process.env.TASK_TRACKER_DATABASE_ID || "";
+const SEARCH_API_KEY = process.env.SEARCH_API_KEY || "";
+const BASE_URL = process.env.BASE_URL || "";
 
 // ---------- HELPERS ----------
-function makeTempFile(fileName) {
-  return path.join("/tmp", fileName);
+function safeName(name) {
+  return String(name).replace(/[^\w\-]+/g, "_").slice(0, 80);
 }
-
-function makePublicURL(fileName) {
-  // Replace with your storage bucket if you want persistence
-  return `https://sol-agent-server.onrender.com/files/${fileName}`;
+function filePathFor(fileName) {
+  return path.join(filesDir, fileName);
+}
+function makePublicURL(req, fileName) {
+  const base =
+    BASE_URL ||
+    `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`;
+  return `${base}/files/${encodeURIComponent(fileName)}`;
 }
 
 // ---------- ENDPOINT: GENERATE DOCUMENT ----------
@@ -36,32 +51,42 @@ app.post("/generate_document", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing required fields" });
     }
 
-    let filePath;
+    const safeTitle = safeName(title);
+    let filePath, fileName;
+
     if (format === "pdf") {
-      filePath = makeTempFile(`${title}.pdf`);
-      const doc = new PDFDocument();
+      fileName = `${safeTitle}.pdf`;
+      filePath = filePathFor(fileName);
+      const doc = new PDFDocument({ margin: 48 });
       doc.pipe(fs.createWriteStream(filePath));
-      doc.fontSize(20).text(title, { align: "center" });
+      doc.fontSize(22).text(title, { align: "center" });
       doc.moveDown();
       doc.fontSize(12).text(content);
       doc.end();
     } else if (format === "pptx") {
-      filePath = makeTempFile(`${title}.pptx`);
+      fileName = `${safeTitle}.pptx`;
+      filePath = filePathFor(fileName);
       const pptx = new PPTXGenJS();
-      const slides = content.split("###");
-      slides.forEach((slideText, idx) => {
+      const slides = String(content).split(/(?:^|\n)###\s*/).filter(Boolean);
+      slides.forEach((slideText) => {
         const slide = pptx.addSlide();
-        slide.addText(slideText.trim(), { x: 0.5, y: 0.5, fontSize: 18, color: "363636" });
+        slide.addText(slideText.trim(), { x: 0.5, y: 0.5, fontSize: 18 });
       });
-      await pptx.writeFile(filePath);
+      await pptx.writeFile({ fileName: filePath });
     } else if (format === "md") {
-      filePath = makeTempFile(`${title}.md`);
+      fileName = `${safeTitle}.md`;
+      filePath = filePathFor(fileName);
       fs.writeFileSync(filePath, content);
     } else {
       return res.status(400).json({ ok: false, error: "Unsupported format" });
     }
 
-    return res.status(200).json({ ok: true, doc_url: makePublicURL(path.basename(filePath)) });
+    return res.status(200).json({
+      ok: true,
+      doc_url: makePublicURL(req, path.basename(filePath)),
+      title,
+      format
+    });
   } catch (err) {
     console.error("Document generation failed:", err);
     res.status(500).json({ ok: false, error: "Failed to generate document" });
@@ -75,6 +100,17 @@ app.post("/update_task", async (req, res) => {
 
     if (!title || !status) {
       return res.status(400).json({ ok: false, error: "Missing required fields" });
+    }
+
+    if (!NOTION_KEY || !NOTION_DATABASE_ID) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        task_id: task_id || "SIMULATED_TASK_ID",
+        title,
+        status,
+        notes: notes || ""
+      });
     }
 
     const notionUrl = "https://api.notion.com/v1/pages";
@@ -107,12 +143,26 @@ app.post("/search_web", async (req, res) => {
     const { query, recency_days } = req.body;
     if (!query) return res.status(400).json({ ok: false, error: "Missing query" });
 
+    if (!SEARCH_API_KEY) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        results: [
+          {
+            title: `Simulated result for: ${query}`,
+            url: "https://example.com/1",
+            snippet: "Stubbed snippet (set SEARCH_API_KEY for live search)"
+          }
+        ]
+      });
+    }
+
     const { data } = await axios.get("https://api.bing.microsoft.com/v7.0/search", {
       headers: { "Ocp-Apim-Subscription-Key": SEARCH_API_KEY },
       params: { q: query, freshness: recency_days ? `Day:${recency_days}` : undefined },
     });
 
-    const results = data.webPages.value.map(r => ({
+    const results = (data.webPages?.value || []).map(r => ({
       title: r.name,
       url: r.url,
       snippet: r.snippet,
@@ -125,5 +175,28 @@ app.post("/search_web", async (req, res) => {
   }
 });
 
+// ---------- HEALTH ----------
+app.get("/health", (_req, res) => {
+  const notionConfigured = Boolean(NOTION_KEY && (NOTION_DATABASE_ID || ROADMAP_DATABASE_ID || TASK_TRACKER_DATABASE_ID));
+  const searchConfigured = Boolean(SEARCH_API_KEY);
+  res.json({
+    ok: true,
+    service: "sol-v3-agent",
+    base_url: BASE_URL || null,
+    notion: notionConfigured ? "configured" : "not_configured",
+    notion_databases: {
+      docs: Boolean(NOTION_DATABASE_ID),
+      roadmap: Boolean(ROADMAP_DATABASE_ID),
+      tasks: Boolean(TASK_TRACKER_DATABASE_ID)
+    },
+    search: searchConfigured ? "configured" : "not_configured"
+  });
+});
+
+app.get("/", (_req, res) => res.json({ ok: true, service: "sol-v3-agent" }));
+
 // ---------- START SERVER ----------
-app.listen(PORT, () => console.log(`🚀 Sol v3 agent running at http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  const base = BASE_URL || `http://localhost:${PORT}`;
+  console.log(`🚀 Sol v3 agent running. Public base: ${base}`);
+});
