@@ -437,7 +437,7 @@ app.post("/upsert_page", async (req, res) => {
         }
       }
 
-      // Helper to resolve a single roadmap title to a page id
+      // Enhanced: resolve a single roadmap title to a page id, with /v1/search fallback
       async function resolveRoadmapTitleToId(titleStr) {
         // Detect title property in roadmap db
         const roadmapSchema = await axios.get(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}`, { headers });
@@ -447,18 +447,42 @@ app.post("/upsert_page", async (req, res) => {
         }
         if (!roadmapTitleProp) return null;
 
+        // 1) exact match
         let q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
           filter: { property: roadmapTitleProp, title: { equals: titleStr } },
           page_size: 1
         }, { headers });
         let match = (q.data?.results || [])[0];
+
+        // 2) contains fallback
         if (!match) {
-          // Fallback to contains (case-insensitive search behavior is Notion-side)
           q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
             filter: { property: roadmapTitleProp, title: { contains: titleStr } },
-            page_size: 1
+            page_size: 5
           }, { headers });
           match = (q.data?.results || [])[0];
+        }
+
+        // 3) global search fallback (filter pages that belong to ROADMAP DB)
+        if (!match) {
+          const s = await axios.post("https://api.notion.com/v1/search", {
+            query: titleStr,
+            filter: { property: "object", value: "page" },
+            sort: { direction: "descending", timestamp: "last_edited_time" }
+          }, { headers });
+          const candidates = (s.data?.results || []).filter(p => {
+            const pid = p?.parent?.database_id;
+            return pid && normId(pid) === normId(ROADMAP_DATABASE_ID);
+          });
+          // prefer exact (case-insensitive) title, else first contains
+          for (const p of candidates) {
+            const titleRich = p.properties?.[roadmapTitleProp]?.title || [];
+            const t = (titleRich.map(x => x?.plain_text || "").join("") || "").trim();
+            if (t.toLowerCase() === String(titleStr).toLowerCase()) { match = p; break; }
+          }
+          if (!match && candidates.length) {
+            match = candidates[0];
+          }
         }
         return match?.id || null;
       }
@@ -492,6 +516,53 @@ app.post("/upsert_page", async (req, res) => {
               normalizedFields[k] = out;
             }
           }
+        }
+      }
+
+      // If any roadmap relation values are still strings after normalization, return a 400 with suggestions
+      const unresolved = [];
+      for (const [k, v] of Object.entries(normalizedFields)) {
+        const looksLikeRoadmapProp = String(k).toLowerCase() === "roadmap";
+        const targetDb = relationTargets[k];
+        const isRoadmapRelation =
+          (targetDb && ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID)) ||
+          looksLikeRoadmapProp;
+        if (isRoadmapRelation) {
+          if (typeof v === "string" || (Array.isArray(v) && v.some(x => typeof x === "string"))) {
+            unresolved.push({ property: k, value: v });
+          }
+        }
+      }
+      if (unresolved.length) {
+        try {
+          // Pull a few phase titles to suggest
+          const schema = await axios.get(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}`, { headers });
+          let roadmapTitleProp = null;
+          for (const [rk, rv] of Object.entries(schema.data?.properties || {})) {
+            if (rv.type === "title") { roadmapTitleProp = rk; break; }
+          }
+          let titles = [];
+          if (roadmapTitleProp) {
+            const q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, { page_size: 10 }, { headers });
+            titles = (q.data?.results || []).map(p => {
+              const r = p.properties?.[roadmapTitleProp]?.title || [];
+              return r.map(t => t?.plain_text || "").join("");
+            }).filter(Boolean);
+          }
+          return res.status(400).json({
+            ok: false,
+            error: "roadmap_title_not_found",
+            hint: "No matching Roadmap phase title could be resolved. Use an exact title or supply the page ID.",
+            unresolved,
+            suggestions: titles
+          });
+        } catch (e) {
+          return res.status(400).json({
+            ok: false,
+            error: "roadmap_title_not_found",
+            hint: "No matching Roadmap phase title could be resolved. Use an exact title or supply the page ID.",
+            unresolved
+          });
         }
       }
       // Attach a hint for debugging
