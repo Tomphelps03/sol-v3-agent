@@ -148,8 +148,84 @@ app.post("/update_task", async (req, res) => {
     const { data } = await axios.post(notionUrl, payload, { headers });
     res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, task_id: data.id, title, status });
   } catch (err) {
-    console.error("Notion update failed:", err);
-    res.status(500).json({ ok: false, error: "Failed to update task" });
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    console.error("Notion update failed:", status, data || err.message);
+    res.status(500).json({
+      ok: false,
+      error: "Failed to update task",
+      status,
+      details: data || err.message
+    });
+  }
+});
+
+// ---------- ENDPOINT: NOTION SCHEMA (debug) ----------
+app.get("/notion_schema", async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    if (!NOTION_KEY || !targetDatabaseId) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId || null,
+        note: "Provide NOTION_KEY and a valid database id to fetch schema."
+      });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const { data } = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    // Return only essential schema bits
+    const props = Object.fromEntries(
+      Object.entries(data.properties || {}).map(([k, v]) => [k, { type: v.type }])
+    );
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, title_property: data.title, properties: props });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    console.error("Notion schema fetch failed:", status, data || err.message);
+    res.status(500).json({ ok: false, error: "Failed to get schema", status, details: data || err.message });
+  }
+});
+
+// ---------- ENDPOINT: NOTION TEST CREATE (debug) ----------
+app.post("/notion_test_create", async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    const title = (req.body?.title || "Sol v3 Health Check").toString();
+    if (!NOTION_KEY || !targetDatabaseId) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId || null,
+        note: "Provide NOTION_KEY and a valid database id to create a page."
+      });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const payload = {
+      parent: { database_id: targetDatabaseId },
+      properties: {
+        Name: { title: [{ text: { content: title } }] }
+      }
+    };
+    const { data } = await axios.post("https://api.notion.com/v1/pages", payload, { headers });
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, task_id: data.id, title });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    console.error("Notion test create failed:", status, data || err.message);
+    res.status(500).json({ ok: false, error: "Failed test create", status, details: data || err.message });
   }
 });
 
