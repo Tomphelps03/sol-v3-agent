@@ -130,23 +130,87 @@ app.post("/update_task", async (req, res) => {
     }
 
     const notionUrl = "https://api.notion.com/v1/pages";
-    const payload = {
-      parent: { database_id: targetDatabaseId },
-      properties: {
-        Name: { title: [{ text: { content: title } }] },
-        Status: { select: { name: status } },
-        Notes: notes ? { rich_text: [{ text: { content: notes } }] } : undefined,
-      },
-    };
-
     const headers = {
       "Authorization": `Bearer ${NOTION_KEY}`,
       "Content-Type": "application/json",
       "Notion-Version": "2022-06-28",
     };
 
-    const { data } = await axios.post(notionUrl, payload, { headers });
-    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, task_id: data.id, title, status });
+    // ---- AUTO-DETECT PROPERTY NAMES FROM SCHEMA ----
+    let titlePropName = "Name";
+    let statusPropName = "Status";
+    let notesPropName = "Notes";
+    try {
+      const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+      const props = schemaResp.data?.properties || {};
+      // title: first property whose type is "title"
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "title") { titlePropName = k; break; }
+      }
+      // status/select: prefer "Status", else first "status" (newer Notion) or "select"
+      let firstSelect = null;
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "status" && !statusPropName) statusPropName = k;
+        if (k.toLowerCase() === "status") statusPropName = k;
+        if (v.type === "select" && !firstSelect) firstSelect = k;
+      }
+      if (!statusPropName && firstSelect) statusPropName = firstSelect;
+      // notes: prefer "Notes", else first rich_text
+      let firstRich = null;
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "rich_text" && !firstRich) firstRich = k;
+      }
+      if (!notesPropName && firstRich) notesPropName = firstRich;
+    } catch (e) {
+      console.warn("Schema fetch failed; falling back to defaults:", e?.response?.status || e.message);
+    }
+
+    // ---- BUILD PROPERTIES USING DETECTED NAMES ----
+    const properties = {};
+    properties[titlePropName] = { title: [{ text: { content: title } }] };
+
+    // Only include Status if schema supports a matching select/status option
+    if (status) {
+      try {
+        const schemaResp2 = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+        const propDef = schemaResp2.data?.properties?.[statusPropName];
+        if (propDef && (propDef.type === "select" || propDef.type === "status")) {
+          // Validate option exists (case-insensitive); if not, omit Status to avoid 400
+          const options = (propDef.select?.options || propDef.status?.options || []).map(o => o.name);
+          const hasOption = options.some(o => (o || "").toLowerCase() === status.toLowerCase());
+          if (hasOption) {
+            properties[statusPropName] = { select: { name: status } };
+            if (propDef.type === "status") {
+              properties[statusPropName] = { status: { name: status } };
+            }
+          } else {
+            console.warn(`Skipping status '${status}' – not found in options for ${statusPropName}`);
+          }
+        }
+      } catch (e) {
+        console.warn("Status validation skipped due to schema fetch error.");
+      }
+    }
+
+    if (notes) {
+      properties[notesPropName] = { rich_text: [{ text: { content: notes } }] };
+    }
+
+    const payload = {
+      parent: { database_id: targetDatabaseId },
+      properties
+    };
+
+    const createResp = await axios.post(notionUrl, payload, { headers });
+    res.status(200).json({
+      ok: true,
+      db: dbSelector || "auto",
+      database_id: targetDatabaseId,
+      task_id: createResp.data.id,
+      title,
+      status: status || null,
+      used_props: { title: titlePropName, status: status ? statusPropName : null, notes: notes ? notesPropName : null }
+    });
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
