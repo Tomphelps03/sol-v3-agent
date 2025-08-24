@@ -286,6 +286,28 @@ app.get("/notion_schema", async (req, res) => {
   }
 });
 
+// ---------- ENDPOINT: NOTION RAW PROPS (debug) ----------
+app.get("/notion_raw_props", async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    if (!NOTION_KEY || !targetDatabaseId) {
+      return res.status(200).json({ ok: true, simulating: true, db: dbSelector || "auto", database_id: targetDatabaseId || null });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const { data } = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, raw_properties: data.properties || {} });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to fetch raw props", status, details: data || err.message });
+  }
+});
+
 // ---------- ENDPOINT: NOTION TEST CREATE (debug) ----------
 app.post("/notion_test_create", async (req, res) => {
   try {
@@ -403,6 +425,9 @@ app.post("/upsert_page", async (req, res) => {
       for (const [k, v] of Object.entries(props)) {
         if (v.type === "relation" && v.relation && v.relation.database_id) {
           relationTargets[k] = v.relation.database_id;
+        } else if (v.type === "relation" && String(k).toLowerCase() === "roadmap" && ROADMAP_DATABASE_ID) {
+          // Fallback: if the property is literally named "Roadmap", assume it targets the ROADMAP DB
+          relationTargets[k] = ROADMAP_DATABASE_ID;
         }
       }
 
@@ -446,6 +471,8 @@ app.post("/upsert_page", async (req, res) => {
           }
         }
       }
+      // Attach a hint for debugging
+      req._sol_relation_normalized = Object.keys(normalizedFields).filter(k => fields[k] !== normalizedFields[k]);
     } catch (e) {
       console.warn("Relation normalization by title failed:", e?.response?.status || e.message);
     }
@@ -548,11 +575,27 @@ app.post("/upsert_page", async (req, res) => {
     if (pageId) {
       // UPDATE (PATCH)
       const updateResp = await axios.patch(`https://api.notion.com/v1/pages/${pageId}`, { properties }, { headers });
-      return res.status(200).json({ ok: true, mode: "update", db: dbSelector || "auto", database_id: targetDatabaseId, page_id: updateResp.data.id, skipped: Object.keys(skips).length ? skips : null });
+      return res.status(200).json({
+        ok: true,
+        mode: "update",
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId,
+        page_id: updateResp.data.id,
+        skipped: Object.keys(skips).length ? skips : null,
+        relation_normalized: req._sol_relation_normalized || null
+      });
     } else {
       // CREATE (POST)
       const createResp = await axios.post("https://api.notion.com/v1/pages", { parent: { database_id: targetDatabaseId }, properties }, { headers });
-      return res.status(200).json({ ok: true, mode: "create", db: dbSelector || "auto", database_id: targetDatabaseId, page_id: createResp.data.id, skipped: Object.keys(skips).length ? skips : null });
+      return res.status(200).json({
+        ok: true,
+        mode: "create",
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId,
+        page_id: createResp.data.id,
+        skipped: Object.keys(skips).length ? skips : null,
+        relation_normalized: req._sol_relation_normalized || null
+      });
     }
   } catch (err) {
     const status = err?.response?.status;
