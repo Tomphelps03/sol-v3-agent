@@ -697,24 +697,67 @@ app.post("/upsert_page", async (req, res) => {
           return { value: { people } };
         }
         case "files": {
-          // Accept a string URL, array of URLs, or Notion file objects; we use external URLs only
+          // Accept a string URL, array of URLs, or simple objects {name, url}
+          // Build Notion external file objects with a required `name`.
           const vals = Array.isArray(value) ? value : [value];
           const files = [];
+          function inferNameFromUrl(u) {
+            try {
+              const withoutQuery = String(u).split("?")[0];
+              const seg = withoutQuery.split("/").filter(Boolean).pop() || "file";
+              return seg.length > 100 ? seg.slice(0, 100) : seg;
+            } catch {
+              return "file";
+            }
+          }
           for (const v of vals) {
             if (!v) continue;
             if (typeof v === "string") {
-              files.push({ type: "external", external: { url: v } });
-            } else if (v && typeof v === "object") {
-              if (v.url) {
-                files.push({ type: "external", external: { url: v.url } });
-              } else if (v.external?.url) {
-                files.push({ type: "external", external: { url: v.external.url } });
+              const urlStr = v.trim();
+              const name = inferNameFromUrl(urlStr);
+              files.push({ type: "external", name, external: { url: urlStr } });
+            } else if (typeof v === "object") {
+              if (v.external?.url) {
+                const name = v.name || inferNameFromUrl(v.external.url);
+                files.push({ type: "external", name, external: { url: v.external.url } });
+              } else if (v.url) {
+                const name = v.name || inferNameFromUrl(v.url);
+                files.push({ type: "external", name, external: { url: v.url } });
+              } else if (v.name && v.href) {
+                files.push({ type: "external", name: String(v.name), external: { url: String(v.href) } });
               }
             }
           }
           if (!files.length) return { skip: true, reason: "invalid_files" };
           return { value: { files } };
         }
+// ---------- ENDPOINT: NOTION USERS (debug) ----------
+app.get("/notion_users", async (req, res) => {
+  try {
+    if (!NOTION_KEY) {
+      return res.status(200).json({ ok: true, simulating: true, note: "Set NOTION_KEY to fetch users." });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const idx = await listAllUsers(headers);
+    const users = [];
+    idx.byId.forEach((u, id) => {
+      users.push({
+        id,
+        name: u?.name || null,
+        email: u?.person?.email || null
+      });
+    });
+    res.status(200).json({ ok: true, users });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to list users", status, details: data || err.message });
+  }
+});
         case "relation": {
           const ids = Array.isArray(value) ? value : [value];
           const rel = ids
