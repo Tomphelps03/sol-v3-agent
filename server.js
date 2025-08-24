@@ -394,6 +394,62 @@ app.post("/upsert_page", async (req, res) => {
     const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
     const props = schemaResp.data?.properties || {};
 
+    // Normalize relation fields by title when the relation targets the ROADMAP database.
+    // This lets callers pass a phase name (string) instead of page IDs for the Roadmap relation.
+    const normalizedFields = { ...fields };
+    try {
+      // Build a map of relation prop name -> target database id
+      const relationTargets = {};
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "relation" && v.relation && v.relation.database_id) {
+          relationTargets[k] = v.relation.database_id;
+        }
+      }
+
+      // Helper to resolve a single roadmap title to a page id
+      async function resolveRoadmapTitleToId(titleStr) {
+        // Detect title property in roadmap db
+        const roadmapSchema = await axios.get(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}`, { headers });
+        let roadmapTitleProp = null;
+        for (const [rk, rv] of Object.entries(roadmapSchema.data?.properties || {})) {
+          if (rv.type === "title") { roadmapTitleProp = rk; break; }
+        }
+        if (!roadmapTitleProp) return null;
+
+        const q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
+          filter: { property: roadmapTitleProp, title: { equals: titleStr } },
+          page_size: 1
+        }, { headers });
+        const match = (q.data?.results || [])[0];
+        return match?.id || null;
+      }
+
+      // Iterate over provided fields: if a field is a relation to the ROADMAP DB and user provided a string/array of strings,
+      // resolve by title(s) to page id(s).
+      for (const [k, v] of Object.entries(fields)) {
+        const targetDb = relationTargets[k];
+        if (targetDb && targetDb === ROADMAP_DATABASE_ID) {
+          if (typeof v === "string") {
+            const id = await resolveRoadmapTitleToId(v);
+            if (id) normalizedFields[k] = [id];
+          } else if (Array.isArray(v)) {
+            const out = [];
+            for (const item of v) {
+              if (typeof item === "string") {
+                const id = await resolveRoadmapTitleToId(item);
+                if (id) out.push(id);
+              } else if (item && typeof item === "object" && item.id) {
+                out.push(item.id);
+              }
+            }
+            if (out.length) normalizedFields[k] = out;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Relation normalization by title failed:", e?.response?.status || e.message);
+    }
+
     // Helper: build a Notion property from a simple value based on schema type
     function buildProp(propName, value) {
       const def = props[propName];
@@ -443,6 +499,15 @@ app.post("/upsert_page", async (req, res) => {
           return { value: { checkbox: Boolean(value) } };
         case "url":
           return { value: { url: String(value) } };
+        case "relation": {
+          const ids = Array.isArray(value) ? value : [value];
+          const rel = ids
+            .map(v => (typeof v === "string" ? v.trim() : (v && v.id ? String(v.id) : null)))
+            .filter(Boolean)
+            .map(id => ({ id }));
+          if (!rel.length) return { skip: true, reason: "invalid_relation" };
+          return { value: { relation: rel } };
+        }
         default:
           return { skip: true, reason: "unsupported_type", type: def.type };
       }
@@ -451,7 +516,7 @@ app.post("/upsert_page", async (req, res) => {
     // Build properties from provided fields
     const properties = {};
     const skips = {};
-    for (const [k, v] of Object.entries(fields)) {
+    for (const [k, v] of Object.entries(normalizedFields)) {
       const built = buildProp(k, v);
       if (built.error) {
         return res.status(400).json({ ok: false, error: built.error, field: k });
