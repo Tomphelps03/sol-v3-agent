@@ -347,6 +347,156 @@ app.post("/notion_test_create", async (req, res) => {
   }
 });
 
+// ---------- ENDPOINT: NOTION UPSERT (flexible fields) ----------
+// Creates a page when page_id is omitted; updates when page_id is provided.
+// Body:
+// {
+//   "db": "docs|roadmap|tasks",
+//   "page_id": "optional-when-updating",
+//   "title": "optional-on-update (required on create)",
+//   "fields": {
+//      "Status": "In Progress",                 // status/select (string)
+//      "Priority": "High",                      // select
+//      "Task type": ["Content","Video"],        // multi_select
+//      "Summary": "Short text",                 // rich_text
+//      "Description": "Longer text here",       // rich_text
+//      "Due date": {"start":"2025-09-01"},      // date (start/end)
+//      "Effort": 3,                             // number
+//      "Done": true,                            // checkbox
+//      "URL": "https://example.com"             // url
+//   }
+// }
+app.post("/upsert_page", async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    const pageId = (req.body?.page_id || "").toString().trim() || null;
+    const title = req.body?.title;
+    const fields = req.body?.fields || {};
+
+    if (!NOTION_KEY || !targetDatabaseId) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId || null,
+        note: "Provide NOTION_KEY and a valid database id to upsert."
+      });
+    }
+
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+
+    // Fetch schema to know property types & valid options
+    const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    const props = schemaResp.data?.properties || {};
+
+    // Helper: build a Notion property from a simple value based on schema type
+    function buildProp(propName, value) {
+      const def = props[propName];
+      if (!def) return { skip: true, reason: "unknown_property" };
+      switch (def.type) {
+        case "title":
+          if (!value) return { error: "title_required" };
+          return { value: { title: [{ text: { content: String(value) } }] } };
+        case "rich_text":
+          return { value: { rich_text: [{ text: { content: String(value) } }] } };
+        case "select": {
+          const options = (def.select?.options || []).map(o => o.name);
+          const name = String(value);
+          const has = options.some(o => o.toLowerCase() === name.toLowerCase());
+          if (!has) return { skip: true, reason: "unknown_option", available: options };
+          return { value: { select: { name } } };
+        }
+        case "multi_select": {
+          const options = (def.multi_select?.options || []).map(o => o.name);
+          const arr = Array.isArray(value) ? value : [value];
+          const valid = arr.filter(v => options.some(o => o.toLowerCase() === String(v).toLowerCase()));
+          if (!valid.length) return { skip: true, reason: "unknown_option", available: options };
+          return { value: { multi_select: valid.map(name => ({ name })) } };
+        }
+        case "status": {
+          const options = (def.status?.options || []).map(o => o.name);
+          const name = String(value);
+          const has = options.some(o => o.toLowerCase() === name.toLowerCase());
+          if (!has) return { skip: true, reason: "unknown_option", available: options };
+          return { value: { status: { name } } };
+        }
+        case "date": {
+          // accepts {start, end, time_zone?} or ISO string
+          if (typeof value === "string") {
+            return { value: { date: { start: value } } };
+          }
+          if (value && (value.start || value.end)) {
+            const { start, end, time_zone } = value;
+            return { value: { date: { start, end, time_zone } } };
+          }
+          return { skip: true, reason: "invalid_date" };
+        }
+        case "number":
+          if (typeof value !== "number") return { skip: true, reason: "invalid_number" };
+          return { value: { number: value } };
+        case "checkbox":
+          return { value: { checkbox: Boolean(value) } };
+        case "url":
+          return { value: { url: String(value) } };
+        default:
+          return { skip: true, reason: "unsupported_type", type: def.type };
+      }
+    }
+
+    // Build properties from provided fields
+    const properties = {};
+    const skips = {};
+    for (const [k, v] of Object.entries(fields)) {
+      const built = buildProp(k, v);
+      if (built.error) {
+        return res.status(400).json({ ok: false, error: built.error, field: k });
+      }
+      if (built.skip) {
+        skips[k] = built.reason === "unknown_option" ? { reason: built.reason, available: built.available } : { reason: built.reason, type: built.type };
+        continue;
+      }
+      properties[k] = built.value;
+    }
+
+    // Ensure we have a title when creating
+    // If user didn't provide title in body fields and schema has a title prop, try to map it from fields if present
+    if (!pageId) {
+      // find title prop
+      let titlePropName = null;
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "title") { titlePropName = k; break; }
+      }
+      if (!title && !properties[titlePropName]) {
+        return res.status(400).json({ ok: false, error: "title_required_on_create", hint: `Provide 'title' or set the '${titlePropName || "title"}' field in 'fields'.` });
+      }
+      // If title provided but not placed yet, put it
+      if (title && titlePropName && !properties[titlePropName]) {
+        properties[titlePropName] = { title: [{ text: { content: String(title) } }] };
+      }
+    }
+
+    if (pageId) {
+      // UPDATE (PATCH)
+      const updateResp = await axios.patch(`https://api.notion.com/v1/pages/${pageId}`, { properties }, { headers });
+      return res.status(200).json({ ok: true, mode: "update", db: dbSelector || "auto", database_id: targetDatabaseId, page_id: updateResp.data.id, skipped: Object.keys(skips).length ? skips : null });
+    } else {
+      // CREATE (POST)
+      const createResp = await axios.post("https://api.notion.com/v1/pages", { parent: { database_id: targetDatabaseId }, properties }, { headers });
+      return res.status(200).json({ ok: true, mode: "create", db: dbSelector || "auto", database_id: targetDatabaseId, page_id: createResp.data.id, skipped: Object.keys(skips).length ? skips : null });
+    }
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    console.error("Notion upsert failed:", status, data || err.message);
+    res.status(500).json({ ok: false, error: "Failed to upsert page", status, details: data || err.message });
+  }
+});
+
 // ---------- ENDPOINT: SEARCH WEB ----------
 app.post("/search_web", async (req, res) => {
   try {
