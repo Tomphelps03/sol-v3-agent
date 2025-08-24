@@ -43,6 +43,82 @@ function toDashedUuid(s) {
   return String(s || "");
 }
 
+// Resolve a page ID in a given database by its title (exact → contains → global search)
+async function resolveTitleToId(dbId, headers, titleStr) {
+  try {
+    // Detect title property
+    const schema = await axios.get(`https://api.notion.com/v1/databases/${dbId}`, { headers });
+    let titleProp = null;
+    for (const [k, v] of Object.entries(schema.data?.properties || {})) {
+      if (v.type === "title") { titleProp = k; break; }
+    }
+    if (!titleProp) return null;
+
+    // 1) exact
+    let q = await axios.post(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      filter: { property: titleProp, title: { equals: titleStr } },
+      page_size: 1
+    }, { headers });
+    let match = (q.data?.results || [])[0];
+
+    // 2) contains
+    if (!match) {
+      q = await axios.post(`https://api.notion.com/v1/databases/${dbId}/query`, {
+        filter: { property: titleProp, title: { contains: titleStr } },
+        page_size: 5
+      }, { headers });
+      match = (q.data?.results || [])[0];
+    }
+
+    // 3) global search filtered to db
+    if (!match) {
+      const s = await axios.post("https://api.notion.com/v1/search", {
+        query: titleStr,
+        filter: { property: "object", value: "page" },
+        sort: { direction: "descending", timestamp: "last_edited_time" }
+      }, { headers });
+      const candidates = (s.data?.results || []).filter(p => {
+        const pid = p?.parent?.database_id;
+        return pid && normId(pid) === normId(dbId);
+      });
+      // prefer exact (CI), else first
+      for (const p of candidates) {
+        // Try to read title from detected prop
+        const tRich = p.properties?.[titleProp]?.title || [];
+        const t = (tRich.map(x => x?.plain_text || "").join("") || "").trim();
+        if (t.toLowerCase() === String(titleStr).toLowerCase()) { match = p; break; }
+      }
+      if (!match && candidates.length) match = candidates[0];
+    }
+    return match?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+// List all workspace users (for people fields). Returns an index by email and by id.
+async function listAllUsers(headers) {
+  const byEmail = new Map();
+  const byId = new Map();
+  let next = undefined;
+  for (let i = 0; i < 10; i++) { // hard cap to avoid runaway
+    const url = next ? `https://api.notion.com/v1/users?start_cursor=${encodeURIComponent(next)}` : "https://api.notion.com/v1/users";
+    const resp = await axios.get(url, { headers });
+    const results = resp.data?.results || [];
+    results.forEach(u => {
+      if (u.id) byId.set(u.id, u);
+      const email = u?.person?.email;
+      if (email) byEmail.set(email.toLowerCase(), u);
+    });
+    if (resp.data?.has_more && resp.data?.next_cursor) {
+      next = resp.data.next_cursor;
+    } else {
+      break;
+    }
+  }
+  return { byEmail, byId };
+}
+
 // Map a database key to an actual Notion database id
 function getNotionDbId(dbKey) {
   const key = String(dbKey || "").toLowerCase();
@@ -431,8 +507,7 @@ app.post("/upsert_page", async (req, res) => {
     const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
     const props = schemaResp.data?.properties || {};
 
-    // Normalize relation fields by title when the relation targets the ROADMAP database.
-    // This lets callers pass a phase name (string) instead of page IDs for the Roadmap relation.
+    // Normalize relation fields by title for Roadmap and Tasks self-relations.
     const normalizedFields = { ...fields };
     try {
       // Build a map of relation prop name -> target database id
@@ -440,74 +515,32 @@ app.post("/upsert_page", async (req, res) => {
       for (const [k, v] of Object.entries(props)) {
         if (v.type === "relation" && v.relation && v.relation.database_id) {
           relationTargets[k] = v.relation.database_id;
-        } else if (v.type === "relation" && String(k).toLowerCase() === "roadmap" && ROADMAP_DATABASE_ID) {
-          // Fallback: if the property is literally named "Roadmap", assume it targets the ROADMAP DB
-          relationTargets[k] = ROADMAP_DATABASE_ID;
+        } else if (v.type === "relation") {
+          const name = String(k).toLowerCase();
+          if (name === "roadmap" && ROADMAP_DATABASE_ID) {
+            relationTargets[k] = ROADMAP_DATABASE_ID;
+          } else if (TASK_TRACKER_DATABASE_ID && (name === "parent task" || name === "parent" || name === "sub tasks" || name === "subtasks" || name === "children")) {
+            // Fallback: common self-relation names in Tasks DB
+            relationTargets[k] = TASK_TRACKER_DATABASE_ID;
+          }
         }
       }
 
-      // Enhanced: resolve a single roadmap title to a page id, with /v1/search fallback
-      async function resolveRoadmapTitleToId(titleStr) {
-        // Detect title property in roadmap db
-        const roadmapSchema = await axios.get(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}`, { headers });
-        let roadmapTitleProp = null;
-        for (const [rk, rv] of Object.entries(roadmapSchema.data?.properties || {})) {
-          if (rv.type === "title") { roadmapTitleProp = rk; break; }
-        }
-        if (!roadmapTitleProp) return null;
-
-        // 1) exact match
-        let q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
-          filter: { property: roadmapTitleProp, title: { equals: titleStr } },
-          page_size: 1
-        }, { headers });
-        let match = (q.data?.results || [])[0];
-
-        // 2) contains fallback
-        if (!match) {
-          q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, {
-            filter: { property: roadmapTitleProp, title: { contains: titleStr } },
-            page_size: 5
-          }, { headers });
-          match = (q.data?.results || [])[0];
-        }
-
-        // 3) global search fallback (filter pages that belong to ROADMAP DB)
-        if (!match) {
-          const s = await axios.post("https://api.notion.com/v1/search", {
-            query: titleStr,
-            filter: { property: "object", value: "page" },
-            sort: { direction: "descending", timestamp: "last_edited_time" }
-          }, { headers });
-          const candidates = (s.data?.results || []).filter(p => {
-            const pid = p?.parent?.database_id;
-            return pid && normId(pid) === normId(ROADMAP_DATABASE_ID);
-          });
-          // prefer exact (case-insensitive) title, else first contains
-          for (const p of candidates) {
-            const titleRich = p.properties?.[roadmapTitleProp]?.title || [];
-            const t = (titleRich.map(x => x?.plain_text || "").join("") || "").trim();
-            if (t.toLowerCase() === String(titleStr).toLowerCase()) { match = p; break; }
-          }
-          if (!match && candidates.length) {
-            match = candidates[0];
-          }
-        }
-        return match?.id || null;
-      }
-
-      // Iterate over provided fields: if a field is a relation to the ROADMAP DB and user provided a string/array of strings,
-      // resolve by title(s) to page id(s).
+      // Generalized resolver for Roadmap and Tasks self-relations
       for (const [k, v] of Object.entries(fields)) {
         const targetDb = relationTargets[k];
-        const looksLikeRoadmapProp = String(k).toLowerCase() === "roadmap";
-        const isRoadmapRelation =
-          (targetDb && ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID)) ||
-          looksLikeRoadmapProp;
+        if (!targetDb) continue;
 
-        if (isRoadmapRelation) {
+        // Decide if this relation points to Roadmap or Tasks (self)
+        const isRoadmapRelation =
+          ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID);
+        const isTasksSelfRelation =
+          TASK_TRACKER_DATABASE_ID && normId(targetDb) === normId(TASK_TRACKER_DATABASE_ID);
+
+        if (isRoadmapRelation || isTasksSelfRelation) {
+          const dbForLookup = isRoadmapRelation ? ROADMAP_DATABASE_ID : TASK_TRACKER_DATABASE_ID;
           if (typeof v === "string") {
-            const id = await resolveRoadmapTitleToId(v);
+            const id = await resolveTitleToId(dbForLookup, headers, v);
             if (id) {
               normalizedFields[k] = [id];
             }
@@ -515,7 +548,7 @@ app.post("/upsert_page", async (req, res) => {
             const out = [];
             for (const item of v) {
               if (typeof item === "string") {
-                const id = await resolveRoadmapTitleToId(item);
+                const id = await resolveTitleToId(dbForLookup, headers, item);
                 if (id) out.push(id);
               } else if (item && typeof item === "object" && item.id) {
                 out.push(item.id);
@@ -528,16 +561,17 @@ app.post("/upsert_page", async (req, res) => {
         }
       }
 
-      // Consider unresolved only if any roadmap relation values remain non-UUID strings
+      // Consider unresolved only if any roadmap or tasks self-relation values remain non-UUID strings
       const uuidRe = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
       const unresolved = [];
       for (const [k, v] of Object.entries(normalizedFields)) {
-        const looksLikeRoadmapProp = String(k).toLowerCase() === "roadmap";
         const targetDb = relationTargets[k];
         const isRoadmapRelation =
           (targetDb && ROADMAP_DATABASE_ID && normId(targetDb) === normId(ROADMAP_DATABASE_ID)) ||
-          looksLikeRoadmapProp;
-        if (!isRoadmapRelation) continue;
+          String(k).toLowerCase() === "roadmap";
+        const isTasksSelfRelation =
+          targetDb && TASK_TRACKER_DATABASE_ID && normId(targetDb) === normId(TASK_TRACKER_DATABASE_ID);
+        if (!isRoadmapRelation && !isTasksSelfRelation) continue;
 
         const vals = Array.isArray(v) ? v : [v];
         const bad = vals.filter(x => typeof x === "string" && !uuidRe.test(toDashedUuid(x)));
@@ -547,32 +581,35 @@ app.post("/upsert_page", async (req, res) => {
       }
       if (unresolved.length) {
         try {
-          // Pull a few phase titles to suggest
-          const schema = await axios.get(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}`, { headers });
-          let roadmapTitleProp = null;
-          for (const [rk, rv] of Object.entries(schema.data?.properties || {})) {
-            if (rv.type === "title") { roadmapTitleProp = rk; break; }
-          }
+          // Pull a few phase titles to suggest (from Roadmap if available, else Tasks)
           let titles = [];
-          if (roadmapTitleProp) {
-            const q = await axios.post(`https://api.notion.com/v1/databases/${ROADMAP_DATABASE_ID}/query`, { page_size: 10 }, { headers });
-            titles = (q.data?.results || []).map(p => {
-              const r = p.properties?.[roadmapTitleProp]?.title || [];
-              return r.map(t => t?.plain_text || "").join("");
-            }).filter(Boolean);
+          let dbForSuggest = ROADMAP_DATABASE_ID || TASK_TRACKER_DATABASE_ID;
+          let titleProp = null;
+          if (dbForSuggest) {
+            const schema = await axios.get(`https://api.notion.com/v1/databases/${dbForSuggest}`, { headers });
+            for (const [rk, rv] of Object.entries(schema.data?.properties || {})) {
+              if (rv.type === "title") { titleProp = rk; break; }
+            }
+            if (titleProp) {
+              const q = await axios.post(`https://api.notion.com/v1/databases/${dbForSuggest}/query`, { page_size: 10 }, { headers });
+              titles = (q.data?.results || []).map(p => {
+                const r = p.properties?.[titleProp]?.title || [];
+                return r.map(t => t?.plain_text || "").join("");
+              }).filter(Boolean);
+            }
           }
           return res.status(400).json({
             ok: false,
-            error: "roadmap_title_not_found",
-            hint: "No matching Roadmap phase title could be resolved. Use an exact title or supply the page ID.",
+            error: "relation_title_not_found",
+            hint: "No matching page title could be resolved for a relation. Use an exact title or supply the page ID.",
             unresolved,
             suggestions: titles
           });
         } catch (e) {
           return res.status(400).json({
             ok: false,
-            error: "roadmap_title_not_found",
-            hint: "No matching Roadmap phase title could be resolved. Use an exact title or supply the page ID.",
+            error: "relation_title_not_found",
+            hint: "No matching page title could be resolved for a relation. Use an exact title or supply the page ID.",
             unresolved
           });
         }
@@ -584,7 +621,7 @@ app.post("/upsert_page", async (req, res) => {
     }
 
     // Helper: build a Notion property from a simple value based on schema type
-    function buildProp(propName, value) {
+    async function buildProp(propName, value) {
       const def = props[propName];
       if (!def) return { skip: true, reason: "unknown_property" };
       switch (def.type) {
@@ -632,6 +669,52 @@ app.post("/upsert_page", async (req, res) => {
           return { value: { checkbox: Boolean(value) } };
         case "url":
           return { value: { url: String(value) } };
+        case "people": {
+          // Accept emails or user IDs (string or array)
+          const vals = Array.isArray(value) ? value : [value];
+          if (!globalThis.__solUsersIndex) {
+            globalThis.__solUsersIndex = await listAllUsers(headers);
+          }
+          const idx = globalThis.__solUsersIndex;
+          const people = [];
+          for (const v of vals) {
+            if (!v) continue;
+            if (typeof v === "string") {
+              const s = v.trim();
+              if (s.includes("@")) {
+                const u = idx.byEmail.get(s.toLowerCase());
+                if (u) people.push({ id: u.id });
+              } else {
+                // assume it's a Notion user id
+                const uid = s;
+                people.push({ id: uid });
+              }
+            } else if (v && v.id) {
+              people.push({ id: String(v.id) });
+            }
+          }
+          if (!people.length) return { skip: true, reason: "unknown_people" };
+          return { value: { people } };
+        }
+        case "files": {
+          // Accept a string URL, array of URLs, or Notion file objects; we use external URLs only
+          const vals = Array.isArray(value) ? value : [value];
+          const files = [];
+          for (const v of vals) {
+            if (!v) continue;
+            if (typeof v === "string") {
+              files.push({ type: "external", external: { url: v } });
+            } else if (v && typeof v === "object") {
+              if (v.url) {
+                files.push({ type: "external", external: { url: v.url } });
+              } else if (v.external?.url) {
+                files.push({ type: "external", external: { url: v.external.url } });
+              }
+            }
+          }
+          if (!files.length) return { skip: true, reason: "invalid_files" };
+          return { value: { files } };
+        }
         case "relation": {
           const ids = Array.isArray(value) ? value : [value];
           const rel = ids
@@ -650,7 +733,7 @@ app.post("/upsert_page", async (req, res) => {
     const properties = {};
     const skips = {};
     for (const [k, v] of Object.entries(normalizedFields)) {
-      const built = buildProp(k, v);
+      const built = await buildProp(k, v);
       if (built.error) {
         return res.status(400).json({ ok: false, error: built.error, field: k });
       }
@@ -775,3 +858,52 @@ app.listen(PORT, () => {
   const base = BASE_URL || `http://localhost:${PORT}`;
   console.log(`🚀 Sol v3 agent running. Public base: ${base}`);
 });
+// ---------- ENDPOINT: FIND PAGES BY TITLE ----------
+// Body: { "db": "docs|roadmap|tasks", "title": "Exact or partial", "exact": true|false }
+app.post("/find_pages", async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    const titleQuery = (req.body?.title || "").toString().trim();
+    const exact = Boolean(req.body?.exact);
+    if (!NOTION_KEY || !targetDatabaseId) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId || null,
+        note: "Provide NOTION_KEY and a valid database id to search."
+      });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const id = await resolveTitleToId(targetDatabaseId, headers, titleQuery);
+    const results = [];
+    if (id) results.push({ id, title: titleQuery });
+    // If not exact, run a contains query to list candidates
+    const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    let titlePropName = null;
+    for (const [k, v] of Object.entries(schemaResp.data?.properties || {})) {
+      if (v.type === "title") { titlePropName = k; break; }
+    }
+    if (titlePropName && !exact) {
+      const q = await axios.post(`https://api.notion.com/v1/databases/${targetDatabaseId}/query`, {
+        filter: titleQuery ? { property: titlePropName, title: { contains: titleQuery } } : undefined,
+        page_size: 10
+      }, { headers });
+      (q.data?.results || []).forEach(p => {
+        const tRich = p.properties?.[titlePropName]?.title || [];
+        const t = (tRich.map(x => x?.plain_text || "").join("") || "").trim();
+        results.push({ id: p.id, title: t });
+      });
+    }
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, results });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to find pages", status, details: data || err.message });
+  }
+})
