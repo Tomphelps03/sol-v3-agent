@@ -193,6 +193,12 @@ app.post("/update_task", async (req, res) => {
             }
           } else {
             console.warn(`Skipping status '${status}' – not found in options for ${statusPropName}`);
+            // Attach a hint we can return later
+            req._sol_status_skipped = {
+              requested: status,
+              property: statusPropName,
+              available: options
+            };
           }
         }
       } catch (e) {
@@ -217,7 +223,8 @@ app.post("/update_task", async (req, res) => {
       task_id: createResp.data.id,
       title,
       status: status || null,
-      used_props: { title: titlePropName, status: status ? statusPropName : null, notes: notes ? notesPropName : null }
+      used_props: { title: titlePropName, status: status ? statusPropName : null, notes: notes ? notesPropName : null },
+      status_skipped: req._sol_status_skipped || null
     });
   } catch (err) {
     const status = err?.response?.status;
@@ -252,11 +259,25 @@ app.get("/notion_schema", async (req, res) => {
       "Notion-Version": "2022-06-28",
     };
     const { data } = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
-    // Return only essential schema bits
+    // Return only essential schema bits, including options for status/select
     const props = Object.fromEntries(
-      Object.entries(data.properties || {}).map(([k, v]) => [k, { type: v.type }])
+      Object.entries(data.properties || {}).map(([k, v]) => {
+        const base = { type: v.type };
+        if (v.type === "status") {
+          base.options = (v.status?.options || []).map(o => o.name);
+        } else if (v.type === "select") {
+          base.options = (v.select?.options || []).map(o => o.name);
+        }
+        return [k, base];
+      })
     );
-    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, title_property: data.title, properties: props });
+    res.status(200).json({
+      ok: true,
+      db: dbSelector || "auto",
+      database_id: targetDatabaseId,
+      title_property: data.title,
+      properties: props
+    });
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
