@@ -28,6 +28,16 @@ const TASK_TRACKER_DATABASE_ID = process.env.TASK_TRACKER_DATABASE_ID || "";
 const SEARCH_API_KEY = process.env.SEARCH_API_KEY || "";
 const BASE_URL = process.env.BASE_URL || "";
 
+// Map a database key to an actual Notion database id
+function getNotionDbId(dbKey) {
+  const key = String(dbKey || "").toLowerCase();
+  if (key === "docs" || key === "documents" || key === "document") return NOTION_DATABASE_ID || "";
+  if (key === "roadmap" || key === "road") return ROADMAP_DATABASE_ID || "";
+  if (key === "tasks" || key === "task" || key === "tracker") return TASK_TRACKER_DATABASE_ID || "";
+  // default preference order if none provided
+  return NOTION_DATABASE_ID || TASK_TRACKER_DATABASE_ID || ROADMAP_DATABASE_ID || "";
+}
+
 // ---------- HELPERS ----------
 function safeName(name) {
   return String(name).replace(/[^\w\-]+/g, "_").slice(0, 80);
@@ -98,14 +108,20 @@ app.post("/update_task", async (req, res) => {
   try {
     const { title, status, notes, task_id } = req.body;
 
+    // Allow caller to choose which Notion DB to use: ?db=docs|roadmap|tasks or body.db
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+
     if (!title || !status) {
       return res.status(400).json({ ok: false, error: "Missing required fields" });
     }
 
-    if (!NOTION_KEY || !NOTION_DATABASE_ID) {
+    if (!NOTION_KEY || !targetDatabaseId) {
       return res.status(200).json({
         ok: true,
         simulating: true,
+        db: dbSelector || "auto",
+        database_id: targetDatabaseId || null,
         task_id: task_id || "SIMULATED_TASK_ID",
         title,
         status,
@@ -115,7 +131,7 @@ app.post("/update_task", async (req, res) => {
 
     const notionUrl = "https://api.notion.com/v1/pages";
     const payload = {
-      parent: { database_id: NOTION_DATABASE_ID },
+      parent: { database_id: targetDatabaseId },
       properties: {
         Name: { title: [{ text: { content: title } }] },
         Status: { select: { name: status } },
@@ -130,7 +146,7 @@ app.post("/update_task", async (req, res) => {
     };
 
     const { data } = await axios.post(notionUrl, payload, { headers });
-    res.status(200).json({ ok: true, task_id: data.id, title, status });
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, task_id: data.id, title, status });
   } catch (err) {
     console.error("Notion update failed:", err);
     res.status(500).json({ ok: false, error: "Failed to update task" });
@@ -189,6 +205,7 @@ app.get("/health", (_req, res) => {
       roadmap: Boolean(ROADMAP_DATABASE_ID),
       tasks: Boolean(TASK_TRACKER_DATABASE_ID)
     },
+    notion_default_order: ["docs","tasks","roadmap"],
     search: searchConfigured ? "configured" : "not_configured"
   });
 });
