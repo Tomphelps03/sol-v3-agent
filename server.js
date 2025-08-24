@@ -137,9 +137,9 @@ app.post("/update_task", async (req, res) => {
     };
 
     // ---- AUTO-DETECT PROPERTY NAMES FROM SCHEMA ----
-    let titlePropName = "Name";
-    let statusPropName = "Status";
-    let notesPropName = "Notes";
+    let titlePropName = null;
+    let statusPropName = null;
+    let notesPropName = null;
     try {
       const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
       const props = schemaResp.data?.properties || {};
@@ -163,6 +163,14 @@ app.post("/update_task", async (req, res) => {
       if (!notesPropName && firstRich) notesPropName = firstRich;
     } catch (e) {
       console.warn("Schema fetch failed; falling back to defaults:", e?.response?.status || e.message);
+    }
+
+    if (!titlePropName) {
+      return res.status(400).json({
+        ok: false,
+        error: "No title property found in target Notion database",
+        hint: "Add a title property (e.g., 'Name' or 'Doc name') to the database."
+      });
     }
 
     // ---- BUILD PROPERTIES USING DETECTED NAMES ----
@@ -192,7 +200,7 @@ app.post("/update_task", async (req, res) => {
       }
     }
 
-    if (notes) {
+    if (notes && notesPropName) {
       properties[notesPropName] = { rich_text: [{ text: { content: notes } }] };
     }
 
@@ -277,14 +285,39 @@ app.post("/notion_test_create", async (req, res) => {
       "Content-Type": "application/json",
       "Notion-Version": "2022-06-28",
     };
+    // Detect title property
+    let titlePropName = null;
+    try {
+      const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+      const props = schemaResp.data?.properties || {};
+      for (const [k, v] of Object.entries(props)) {
+        if (v.type === "title") { titlePropName = k; break; }
+      }
+    } catch (e) {
+      console.warn("Schema fetch failed in notion_test_create");
+    }
+    if (!titlePropName) {
+      return res.status(400).json({
+        ok: false,
+        error: "No title property found; cannot create test page",
+        hint: "Add a title property to this database in Notion."
+      });
+    }
     const payload = {
       parent: { database_id: targetDatabaseId },
       properties: {
-        Name: { title: [{ text: { content: title } }] }
+        [titlePropName]: { title: [{ text: { content: title } }] }
       }
     };
     const { data } = await axios.post("https://api.notion.com/v1/pages", payload, { headers });
-    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, task_id: data.id, title });
+    res.status(200).json({
+      ok: true,
+      db: dbSelector || "auto",
+      database_id: targetDatabaseId,
+      task_id: data.id,
+      title,
+      used_props: { title: titlePropName }
+    });
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
