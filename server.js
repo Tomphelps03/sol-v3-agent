@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import PDFDocument from "pdfkit";
 import PPTXGenJS from "pptxgenjs";
+import { Document, Packer, Paragraph, TextRun } from "docx";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -174,6 +175,16 @@ app.post("/generate_document", async (req, res) => {
         slide.addText(slideText.trim(), { x: 0.5, y: 0.5, fontSize: 18 });
       });
       await pptx.writeFile({ fileName: filePath });
+    } else if (format === "docx") {
+      fileName = `${safeTitle}.docx`;
+      filePath = filePathFor(fileName);
+      const lines = String(content).split(/\n+/);
+      const paragraphs = lines.map((line) =>
+        new Paragraph({ children: [new TextRun(String(line))] })
+      );
+      const docx = new Document({ sections: [{ properties: {}, children: paragraphs }] });
+      const buffer = await Packer.toBuffer(docx);
+      fs.writeFileSync(filePath, buffer);
     } else if (format === "md") {
       fileName = `${safeTitle}.md`;
       filePath = filePathFor(fileName);
@@ -731,33 +742,6 @@ app.post("/upsert_page", async (req, res) => {
           if (!files.length) return { skip: true, reason: "invalid_files" };
           return { value: { files } };
         }
-// ---------- ENDPOINT: NOTION USERS (debug) ----------
-app.get("/notion_users", async (req, res) => {
-  try {
-    if (!NOTION_KEY) {
-      return res.status(200).json({ ok: true, simulating: true, note: "Set NOTION_KEY to fetch users." });
-    }
-    const headers = {
-      "Authorization": `Bearer ${NOTION_KEY}`,
-      "Content-Type": "application/json",
-      "Notion-Version": "2022-06-28",
-    };
-    const idx = await listAllUsers(headers);
-    const users = [];
-    idx.byId.forEach((u, id) => {
-      users.push({
-        id,
-        name: u?.name || null,
-        email: u?.person?.email || null
-      });
-    });
-    res.status(200).json({ ok: true, users });
-  } catch (err) {
-    const status = err?.response?.status;
-    const data = err?.response?.data;
-    res.status(500).json({ ok: false, error: "Failed to list users", status, details: data || err.message });
-  }
-});
         case "relation": {
           const ids = Array.isArray(value) ? value : [value];
           const rel = ids
@@ -804,9 +788,46 @@ app.get("/notion_users", async (req, res) => {
       }
     }
 
+    const content = req.body?.content || null;
+    async function maybeAppendContent(targetPageId) {
+      if (!content) return null;
+      const headers2 = {
+        "Authorization": `Bearer ${NOTION_KEY}`,
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+      };
+      const blocks = [];
+      if (typeof content.description === "string" && content.description.trim()) {
+        const parts = content.description.split(/\n+/).filter(s => s.trim().length);
+        parts.forEach(p => blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: p } }] } }));
+      }
+      if (Array.isArray(content.subtasks)) {
+        content.subtasks.forEach(it => {
+          if (!it || !it.text) return;
+          blocks.push({ object: "block", type: "to_do", to_do: { rich_text: [{ type: "text", text: { content: String(it.text) } }], checked: Boolean(it.checked) } });
+        });
+      }
+      if (Array.isArray(content.files)) {
+        const inferName = (u) => { try { const wq = String(u).split("?")[0]; const seg = wq.split("/").filter(Boolean).pop() || "file"; return seg.slice(0,100); } catch { return "file"; } };
+        content.files.forEach(f => {
+          let url = null;
+          if (typeof f === "string") url = f;
+          else if (f && typeof f === "object") url = f.url || f.href || (f.external && f.external.url) || null;
+          if (url) {
+            blocks.push({ object: "block", type: "file", file: { type: "external", external: { url } } });
+            const name = (typeof f === "object" && f.name) ? f.name : inferName(url);
+            blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: name }, annotations: { italic: true } }] } });
+          }
+        });
+      }
+      if (!blocks.length) return null;
+      return appendBlocks(headers2, targetPageId, blocks);
+    }
+
     if (pageId) {
       // UPDATE (PATCH)
       const updateResp = await axios.patch(`https://api.notion.com/v1/pages/${pageId}`, { properties }, { headers });
+      await maybeAppendContent(updateResp.data.id);
       return res.status(200).json({
         ok: true,
         mode: "update",
@@ -819,6 +840,7 @@ app.get("/notion_users", async (req, res) => {
     } else {
       // CREATE (POST)
       const createResp = await axios.post("https://api.notion.com/v1/pages", { parent: { database_id: targetDatabaseId }, properties }, { headers });
+      await maybeAppendContent(createResp.data.id);
       return res.status(200).json({
         ok: true,
         mode: "create",
@@ -829,6 +851,40 @@ app.get("/notion_users", async (req, res) => {
         relation_normalized: req._sol_relation_normalized || null
       });
     }
+// ---------- ENDPOINT: NOTION USERS (debug) ----------
+app.get("/notion_users", async (req, res) => {
+  try {
+    if (!NOTION_KEY) {
+      return res.status(200).json({ ok: true, simulating: true, note: "Set NOTION_KEY to fetch users." });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const idx = await listAllUsers(headers);
+    const users = [];
+    idx.byId.forEach((u, id) => {
+      users.push({
+        id,
+        name: u?.name || null,
+        email: u?.person?.email || null
+      });
+    });
+    res.status(200).json({ ok: true, users });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to list users", status, details: data || err.message });
+  }
+});
+
+// ---------- HELPERS ----------
+async function appendBlocks(headers, pageId, blocks) {
+  const url = `https://api.notion.com/v1/blocks/${pageId}/children`;
+  return axios.patch(url, { children: blocks }, { headers });
+}
+
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
@@ -950,3 +1006,75 @@ app.post("/find_pages", async (req, res) => {
     res.status(500).json({ ok: false, error: "Failed to find pages", status, details: data || err.message });
   }
 })
+// ---------- ENDPOINT: APPEND TASK CONTENT ----------
+// Body: { page_id: "...", description?: "text", subtasks?: [{text, checked}], files?: [url|string|{name,url}] }
+app.post("/append_task_content", async (req, res) => {
+  try {
+    const pageId = String(req.body?.page_id || "").trim();
+    const description = req.body?.description;
+    const subtasks = Array.isArray(req.body?.subtasks) ? req.body.subtasks : [];
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+    if (!pageId) return res.status(400).json({ ok: false, error: "page_id_required" });
+    if (!NOTION_KEY) return res.status(200).json({ ok: true, simulating: true, page_id: pageId });
+
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+
+    const blocks = [];
+
+    // Description paragraphs
+    if (typeof description === "string" && description.trim()) {
+      const parts = description.split(/\n+/).filter(s => s.trim().length);
+      parts.forEach(p => blocks.push({
+        object: "block",
+        type: "paragraph",
+        paragraph: { rich_text: [{ type: "text", text: { content: p } }] }
+      }));
+    }
+
+    // Subtasks as to_do blocks
+    for (const it of subtasks) {
+      if (!it || !it.text) continue;
+      blocks.push({
+        object: "block",
+        type: "to_do",
+        to_do: {
+          rich_text: [{ type: "text", text: { content: String(it.text) } }],
+          checked: Boolean(it.checked)
+        }
+      });
+    }
+
+    // File blocks (external URLs)
+    const inferName = (u) => {
+      try { const wq = String(u).split("?")[0]; const seg = wq.split("/").filter(Boolean).pop() || "file"; return seg.slice(0,100); }
+      catch { return "file"; }
+    };
+    for (const f of files) {
+      let url = null, name = null;
+      if (typeof f === "string") { url = f; name = inferName(f); }
+      else if (f && typeof f === "object") {
+        url = f.url || f.href || (f.external && f.external.url) || null;
+        name = f.name || (url ? inferName(url) : null);
+      }
+      if (url) {
+        blocks.push({ object: "block", type: "file", file: { type: "external", external: { url } } });
+        if (name) {
+          blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: name }, annotations: { italic: true } }] } });
+        }
+      }
+    }
+
+    if (!blocks.length) return res.status(400).json({ ok: false, error: "no_content" });
+
+    const resp = await appendBlocks(headers, pageId, blocks);
+    return res.status(200).json({ ok: true, page_id: pageId, appended: blocks.length, notion_request_id: resp.headers["x-request-id"] || null });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to append content", status, details: data || err.message });
+  }
+});
