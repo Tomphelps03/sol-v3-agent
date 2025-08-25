@@ -410,6 +410,34 @@ app.get("/notion_raw_props", async (req, res) => {
   }
 });
 
+// ---------- ENDPOINT: NOTION USERS (debug) ----------
+app.get("/notion_users", async (req, res) => {
+  try {
+    if (!NOTION_KEY) {
+      return res.status(200).json({ ok: true, simulating: true, note: "Set NOTION_KEY to fetch users." });
+    }
+    const headers = {
+      "Authorization": `Bearer ${NOTION_KEY}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    };
+    const idx = await listAllUsers(headers);
+    const users = [];
+    idx.byId.forEach((u, id) => {
+      users.push({
+        id,
+        name: u?.name || null,
+        email: u?.person?.email || null
+      });
+    });
+    res.status(200).json({ ok: true, users });
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to list users", status, details: data || err.message });
+  }
+});
+
 // ---------- ENDPOINT: NOTION TEST CREATE (debug) ----------
 app.post("/notion_test_create", async (req, res) => {
   try {
@@ -470,6 +498,12 @@ app.post("/notion_test_create", async (req, res) => {
     res.status(500).json({ ok: false, error: "Failed test create", status, details: data || err.message });
   }
 });
+
+// ---------- HELPERS ----------
+async function appendBlocks(headers, pageId, blocks) {
+  const url = `https://api.notion.com/v1/blocks/${pageId}/children`;
+  return axios.patch(url, { children: blocks }, { headers });
+}
 
 // ---------- ENDPOINT: NOTION UPSERT (flexible fields) ----------
 // Creates a page when page_id is omitted; updates when page_id is provided.
@@ -851,39 +885,6 @@ app.post("/upsert_page", async (req, res) => {
         relation_normalized: req._sol_relation_normalized || null
       });
     }
-// ---------- ENDPOINT: NOTION USERS (debug) ----------
-app.get("/notion_users", async (req, res) => {
-  try {
-    if (!NOTION_KEY) {
-      return res.status(200).json({ ok: true, simulating: true, note: "Set NOTION_KEY to fetch users." });
-    }
-    const headers = {
-      "Authorization": `Bearer ${NOTION_KEY}`,
-      "Content-Type": "application/json",
-      "Notion-Version": "2022-06-28",
-    };
-    const idx = await listAllUsers(headers);
-    const users = [];
-    idx.byId.forEach((u, id) => {
-      users.push({
-        id,
-        name: u?.name || null,
-        email: u?.person?.email || null
-      });
-    });
-    res.status(200).json({ ok: true, users });
-  } catch (err) {
-    const status = err?.response?.status;
-    const data = err?.response?.data;
-    res.status(500).json({ ok: false, error: "Failed to list users", status, details: data || err.message });
-  }
-});
-
-// ---------- HELPERS ----------
-async function appendBlocks(headers, pageId, blocks) {
-  const url = `https://api.notion.com/v1/blocks/${pageId}/children`;
-  return axios.patch(url, { children: blocks }, { headers });
-}
 
   } catch (err) {
     const status = err?.response?.status;
