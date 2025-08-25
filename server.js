@@ -293,6 +293,17 @@ async function appendBlocks(headers, pageId, blocks) {
   return doNotion("patch", url, { headers, data: { children: blocks } });
 }
 
+
+// ─────────────────────────── Request Logging (debug) ───────────────────────────
+app.use((req, _res, next) => {
+  try {
+    const ua = req.get("user-agent") || "";
+    const ip = req.ip;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ip=${ip} ua="${ua}"`);
+  } catch (_) { /* ignore */ }
+  next();
+});
+
 // ─────────────────────────── Endpoints ───────────────────────────
 
 // Generate DOC/PPT/PDF/MD
@@ -894,6 +905,24 @@ app.get("/health", (req, res) => {
     notion_default_order: ["docs", "tasks", "roadmap"].filter(Boolean),
     search: searchConfigured ? "configured" : "not_configured",
     auth: SERVER_TOKEN ? "protected" : "open"
+  });
+});
+
+// Whoami / header echo (debug)
+app.get("/whoami", (req, res) => {
+  res.json({
+    ok: true,
+    method: req.method,
+    ip: req.ip,
+    ips: req.ips,
+    headers: {
+      host: req.get("host"),
+      "user-agent": req.get("user-agent"),
+      "x-forwarded-for": req.get("x-forwarded-for") || null,
+      "x-sol-token": req.get("x-sol-token") ? "<present>" : null,
+      authorization: req.get("authorization") ? "<present>" : null,
+      "content-type": req.get("content-type") || null
+    }
   });
 });
 
