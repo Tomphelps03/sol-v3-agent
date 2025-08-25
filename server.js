@@ -500,9 +500,172 @@ app.post("/notion_test_create", async (req, res) => {
 });
 
 // ---------- HELPERS ----------
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Generic Notion call with retry/backoff for 409/429
+async function doNotion(method, url, { headers, data, params } = {}) {
+  let attempt = 0;
+  const max = 5;
+  let lastErr;
+  while (attempt < max) {
+    try {
+      return await axios({
+        method,
+        url,
+        headers,
+        data,
+        params,
+      });
+    } catch (err) {
+      const status = err?.response?.status;
+      // Retry on conflict/rate-limit; small jittered backoff
+      if (status === 409 || status === 429) {
+        const wait = Math.min(2000, 250 * Math.pow(2, attempt)) + Math.floor(Math.random() * 100);
+        await sleep(wait);
+        attempt++;
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error("Unknown Notion error");
+}
+
+// Build Notion blocks from flexible content spec
+// Supports: description (paragraphs), subtasks (to_do), files (external),
+// and a generic `blocks` array with types:
+// heading_1/2/3, bulleted_list_item, numbered_list_item, callout, toggle, code, paragraph
+function buildBlocksFromContent(content) {
+  const blocks = [];
+  if (!content) return blocks;
+
+  // 1) description paragraphs
+  if (typeof content.description === "string" && content.description.trim()) {
+    const parts = content.description.split(/\n+/).filter((s) => s.trim().length);
+    parts.forEach((p) =>
+      blocks.push({
+        object: "block",
+        type: "paragraph",
+        paragraph: { rich_text: [{ type: "text", text: { content: p } }] },
+      })
+    );
+  }
+
+  // 2) explicit blocks
+  if (Array.isArray(content.blocks)) {
+    for (const b of content.blocks) {
+      if (!b || typeof b !== "object") continue;
+      const text = (b.text ?? "").toString();
+      const rich_text = [{ type: "text", text: { content: text } }];
+      switch (b.type) {
+        case "heading_1":
+        case "heading_2":
+        case "heading_3":
+          blocks.push({ object: "block", type: b.type, [b.type]: { rich_text } });
+          break;
+        case "bulleted_list_item":
+        case "numbered_list_item":
+        case "paragraph":
+          blocks.push({ object: "block", type: b.type, [b.type]: { rich_text } });
+          break;
+        case "callout":
+          blocks.push({
+            object: "block",
+            type: "callout",
+            callout: {
+              icon: b.icon ? { type: "emoji", emoji: String(b.icon) } : undefined,
+              rich_text,
+            },
+          });
+          break;
+        case "toggle":
+          blocks.push({ object: "block", type: "toggle", toggle: { rich_text } });
+          break;
+        case "code":
+          blocks.push({
+            object: "block",
+            type: "code",
+            code: { rich_text, language: b.language || "plain text" },
+          });
+          break;
+        default:
+          // ignore unknown custom type
+          break;
+      }
+    }
+  }
+
+  // 3) to-do subtasks
+  if (Array.isArray(content.subtasks)) {
+    for (const it of content.subtasks) {
+      if (!it || !it.text) continue;
+      blocks.push({
+        object: "block",
+        type: "to_do",
+        to_do: {
+          rich_text: [{ type: "text", text: { content: String(it.text) } }],
+          checked: Boolean(it.checked),
+        },
+      });
+    }
+  }
+
+  // 4) external files
+  if (Array.isArray(content.files)) {
+    const inferName = (u) => {
+      try {
+        const wq = String(u).split("?")[0];
+        const seg = wq.split("/").filter(Boolean).pop() || "file";
+        return seg.slice(0, 100);
+      } catch {
+        return "file";
+      }
+    };
+    for (const f of content.files) {
+      let url = null;
+      let name = null;
+      if (typeof f === "string") {
+        url = f;
+        name = inferName(f);
+      } else if (f && typeof f === "object") {
+        url = f.url || f.href || (f.external && f.external.url) || null;
+        name = f.name || (url ? inferName(url) : null);
+      }
+      if (url) {
+        blocks.push({
+          object: "block",
+          type: "file",
+          file: { type: "external", external: { url } },
+        });
+        if (name) {
+          blocks.push({
+            object: "block",
+            type: "paragraph",
+            paragraph: {
+              rich_text: [
+                {
+                  type: "text",
+                  text: { content: name },
+                  annotations: { italic: true },
+                },
+              ],
+            },
+          });
+        }
+      }
+    }
+  }
+
+  return blocks;
+}
+
+// Append child blocks to a page with retries
 async function appendBlocks(headers, pageId, blocks) {
   const url = `https://api.notion.com/v1/blocks/${pageId}/children`;
-  return axios.patch(url, { children: blocks }, { headers });
+  return doNotion("patch", url, { headers, data: { children: blocks } });
 }
 
 // ---------- ENDPOINT: NOTION UPSERT (flexible fields) ----------
@@ -830,30 +993,7 @@ app.post("/upsert_page", async (req, res) => {
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28",
       };
-      const blocks = [];
-      if (typeof content.description === "string" && content.description.trim()) {
-        const parts = content.description.split(/\n+/).filter(s => s.trim().length);
-        parts.forEach(p => blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: p } }] } }));
-      }
-      if (Array.isArray(content.subtasks)) {
-        content.subtasks.forEach(it => {
-          if (!it || !it.text) return;
-          blocks.push({ object: "block", type: "to_do", to_do: { rich_text: [{ type: "text", text: { content: String(it.text) } }], checked: Boolean(it.checked) } });
-        });
-      }
-      if (Array.isArray(content.files)) {
-        const inferName = (u) => { try { const wq = String(u).split("?")[0]; const seg = wq.split("/").filter(Boolean).pop() || "file"; return seg.slice(0,100); } catch { return "file"; } };
-        content.files.forEach(f => {
-          let url = null;
-          if (typeof f === "string") url = f;
-          else if (f && typeof f === "object") url = f.url || f.href || (f.external && f.external.url) || null;
-          if (url) {
-            blocks.push({ object: "block", type: "file", file: { type: "external", external: { url } } });
-            const name = (typeof f === "object" && f.name) ? f.name : inferName(url);
-            blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: name }, annotations: { italic: true } }] } });
-          }
-        });
-      }
+      const blocks = buildBlocksFromContent(content);
       if (!blocks.length) return null;
       return appendBlocks(headers2, targetPageId, blocks);
     }
@@ -966,6 +1106,7 @@ app.post("/find_pages", async (req, res) => {
     const targetDatabaseId = getNotionDbId(dbSelector);
     const titleQuery = (req.body?.title || "").toString().trim();
     const exact = Boolean(req.body?.exact);
+
     if (!NOTION_KEY || !targetDatabaseId) {
       return res.status(200).json({
         ok: true,
@@ -975,46 +1116,79 @@ app.post("/find_pages", async (req, res) => {
         note: "Provide NOTION_KEY and a valid database id to search."
       });
     }
+
     const headers = {
       "Authorization": `Bearer ${NOTION_KEY}`,
       "Content-Type": "application/json",
       "Notion-Version": "2022-06-28",
     };
-    const id = await resolveTitleToId(targetDatabaseId, headers, titleQuery);
-    const results = [];
-    if (id) results.push({ id, title: titleQuery });
-    // If not exact, run a contains query to list candidates
-    const schemaResp = await axios.get(`https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+
+    // Resolve title property
+    const schema = await doNotion("get", `https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
     let titlePropName = null;
-    for (const [k, v] of Object.entries(schemaResp.data?.properties || {})) {
+    for (const [k, v] of Object.entries(schema.data?.properties || {})) {
       if (v.type === "title") { titlePropName = k; break; }
     }
-    if (titlePropName && !exact) {
-      const q = await axios.post(`https://api.notion.com/v1/databases/${targetDatabaseId}/query`, {
-        filter: titleQuery ? { property: titlePropName, title: { contains: titleQuery } } : undefined,
-        page_size: 10
-      }, { headers });
-      (q.data?.results || []).forEach(p => {
-        const tRich = p.properties?.[titlePropName]?.title || [];
-        const t = (tRich.map(x => x?.plain_text || "").join("") || "").trim();
-        results.push({ id: p.id, title: t });
-      });
+    if (!titlePropName) {
+      return res.status(400).json({ ok: false, error: "no_title_property" });
     }
-    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, results });
+
+    const results = [];
+
+    // Try exact match first (if query provided)
+    if (titleQuery) {
+      const exactResp = await doNotion("post", `https://api.notion.com/v1/databases/${targetDatabaseId}/query`, {
+        headers,
+        data: { filter: { property: titlePropName, title: { equals: titleQuery } }, page_size: 5 },
+      });
+      for (const p of (exactResp.data?.results || [])) {
+        const tRich = p.properties?.[titlePropName]?.title || [];
+        const t = (tRich.map((x) => x?.plain_text || "").join("") || "").trim();
+        results.push({ id: p.id, title: t });
+      }
+    }
+
+    // If not exact-only, also run contains
+    if (!exact && titleQuery) {
+      const containsResp = await doNotion("post", `https://api.notion.com/v1/databases/${targetDatabaseId}/query`, {
+        headers,
+        data: { filter: { property: titlePropName, title: { contains: titleQuery } }, page_size: 10 },
+      });
+      for (const p of (containsResp.data?.results || [])) {
+        const tRich = p.properties?.[titlePropName]?.title || [];
+        const t = (tRich.map((x) => x?.plain_text || "").join("") || "").trim();
+        // avoid duplicates
+        if (!results.find((r) => r.id === p.id)) {
+          results.push({ id: p.id, title: t });
+        }
+      }
+    }
+
+    // If no query or still empty, return a short recent list
+    if (!titleQuery || results.length === 0) {
+      const listResp = await doNotion("post", `https://api.notion.com/v1/databases/${targetDatabaseId}/query`, {
+        headers,
+        data: { page_size: 10, sorts: [{ timestamp: "last_edited_time", direction: "descending" }] },
+      });
+      for (const p of (listResp.data?.results || [])) {
+        const tRich = p.properties?.[titlePropName]?.title || [];
+        const t = (tRich.map((x) => x?.plain_text || "").join("") || "").trim();
+        results.push({ id: p.id, title: t });
+      }
+    }
+
+    return res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, results });
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
     res.status(500).json({ ok: false, error: "Failed to find pages", status, details: data || err.message });
   }
-})
+});
 // ---------- ENDPOINT: APPEND TASK CONTENT ----------
-// Body: { page_id: "...", description?: "text", subtasks?: [{text, checked}], files?: [url|string|{name,url}] }
+// Accepts description, subtasks, files, and flexible blocks
 app.post("/append_task_content", async (req, res) => {
   try {
     const pageId = String(req.body?.page_id || "").trim();
-    const description = req.body?.description;
-    const subtasks = Array.isArray(req.body?.subtasks) ? req.body.subtasks : [];
-    const files = Array.isArray(req.body?.files) ? req.body.files : [];
     if (!pageId) return res.status(400).json({ ok: false, error: "page_id_required" });
     if (!NOTION_KEY) return res.status(200).json({ ok: true, simulating: true, page_id: pageId });
 
@@ -1024,55 +1198,24 @@ app.post("/append_task_content", async (req, res) => {
       "Notion-Version": "2022-06-28",
     };
 
-    const blocks = [];
-
-    // Description paragraphs
-    if (typeof description === "string" && description.trim()) {
-      const parts = description.split(/\n+/).filter(s => s.trim().length);
-      parts.forEach(p => blocks.push({
-        object: "block",
-        type: "paragraph",
-        paragraph: { rich_text: [{ type: "text", text: { content: p } }] }
-      }));
-    }
-
-    // Subtasks as to_do blocks
-    for (const it of subtasks) {
-      if (!it || !it.text) continue;
-      blocks.push({
-        object: "block",
-        type: "to_do",
-        to_do: {
-          rich_text: [{ type: "text", text: { content: String(it.text) } }],
-          checked: Boolean(it.checked)
-        }
-      });
-    }
-
-    // File blocks (external URLs)
-    const inferName = (u) => {
-      try { const wq = String(u).split("?")[0]; const seg = wq.split("/").filter(Boolean).pop() || "file"; return seg.slice(0,100); }
-      catch { return "file"; }
+    // Accept legacy fields and new flexible `blocks`
+    const content = {
+      description: req.body?.description,
+      subtasks: Array.isArray(req.body?.subtasks) ? req.body.subtasks : [],
+      files: Array.isArray(req.body?.files) ? req.body.files : [],
+      blocks: Array.isArray(req.body?.blocks) ? req.body.blocks : undefined,
     };
-    for (const f of files) {
-      let url = null, name = null;
-      if (typeof f === "string") { url = f; name = inferName(f); }
-      else if (f && typeof f === "object") {
-        url = f.url || f.href || (f.external && f.external.url) || null;
-        name = f.name || (url ? inferName(url) : null);
-      }
-      if (url) {
-        blocks.push({ object: "block", type: "file", file: { type: "external", external: { url } } });
-        if (name) {
-          blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: name }, annotations: { italic: true } }] } });
-        }
-      }
-    }
 
+    const blocks = buildBlocksFromContent(content);
     if (!blocks.length) return res.status(400).json({ ok: false, error: "no_content" });
 
     const resp = await appendBlocks(headers, pageId, blocks);
-    return res.status(200).json({ ok: true, page_id: pageId, appended: blocks.length, notion_request_id: resp.headers["x-request-id"] || null });
+    return res.status(200).json({
+      ok: true,
+      page_id: pageId,
+      appended: blocks.length,
+      notion_request_id: resp?.headers?.["x-request-id"] || null,
+    });
   } catch (err) {
     const status = err?.response?.status;
     const data = err?.response?.data;
