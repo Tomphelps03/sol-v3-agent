@@ -566,7 +566,7 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
   try {
     const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
     const targetDatabaseId = getNotionDbId(dbSelector);
-    const pageId = (req.body?.page_id || "").toString().trim() || null;
+    let pageId = (req.body?.page_id || "").toString().trim() || null;
     const title = req.body?.title;
     const fields = req.body?.fields || req.body?.properties || {};
 
@@ -575,7 +575,16 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
     const __incomingContent = req.body?.content || null;
     if (__incomingContent && __incomingContent.meta && typeof __incomingContent.meta === "object") {
       try {
+        // Prefer page_id from content.meta if not explicitly provided
+        const metaPid = __incomingContent.meta.page_id || __incomingContent.meta.id || null;
+        if (!pageId && metaPid) {
+          pageId = String(metaPid).trim() || null;
+        }
+
+        // Merge meta → fields, but skip control keys that are not Notion property names
+        const CONTROL_KEYS = new Set(["page_id", "id", "_update", "_mode"]);
         for (const [mk, mv] of Object.entries(__incomingContent.meta)) {
+          if (CONTROL_KEYS.has(String(mk))) continue;
           if (fields[mk] === undefined) {
             fields[mk] = mv;
           }
