@@ -34,6 +34,8 @@ const SEARCH_API_KEY = process.env.SEARCH_API_KEY || "";
 const BASE_URL = process.env.BASE_URL || "";
 const VERSION = process.env.SOL_VERSION || "v3.1.0";
 const SERVER_TOKEN = process.env.SERVER_TOKEN || ""; // when set, mutating routes require this
+const AUTO_AUTH = String(process.env.AUTO_AUTH || "true").toLowerCase() === "true"; // default on
+const STRICT_MODE = String(process.env.STRICT_MODE || "true").toLowerCase() === "true"; // default strict
 
 // ─────────────────────────── Tiny Utils ───────────────────────────
 function normId(s) {
@@ -59,10 +61,33 @@ function makePublicURL(req, fileName) {
   return `${base}/files/${encodeURIComponent(fileName)}`;
 }
 
-// Optional auth for mutating routes
+// Optional auth for mutating routes with auto-authorization tiers
 function requireSolAuth(req, res, next) {
+  // Auto-authorization tiers for convenience; UI approval is separate
+  const path = (req.path || "").toLowerCase();
+  const method = (req.method || "GET").toUpperCase();
+  const dbSel = ((req.query?.db || req.body?.db || "").toString() || "").toLowerCase();
+
+  // Tier 1: read-only, always allowed
+  const tier1 = [
+    "/health", "/whoami", "/find_pages", "/get_page", "/page_markdown",
+    "/notion_schema", "/notion_raw_props", "/notion_users", "/search_web"
+  ];
+
+  // Tier 2: sandbox writes in Docs DB allowed (non-destructive)
+  const tier2 = [
+    "/upsert_page", "/append_task_content", "/generate_document", "/memory_note"
+  ];
+
+  const isTier1 = tier1.includes(path);
+  const isTier2 = tier2.includes(path) && (dbSel === "docs" || dbSel === "documents" || dbSel === "document");
+
+  if (AUTO_AUTH && (isTier1 || (!STRICT_MODE && (isTier1 || isTier2)))) {
+    return next(); // bypass token for safe calls when AUTO_AUTH or when STRICT_MODE=false
+  }
+
   if (!SERVER_TOKEN) return next(); // open mode
-  const tok = req.headers["x-sol-token"] || req.headers["authorization"];
+  const tok = req.headers["x-sol-token"] || req.headers["authorization"]; 
   const bearer = typeof tok === "string" && tok.startsWith("Bearer ") ? tok.slice(7) : tok;
   if (bearer && String(bearer) === String(SERVER_TOKEN)) return next();
   return res.status(401).json({ ok: false, error: "unauthorized" });
@@ -292,6 +317,359 @@ async function appendBlocks(headers, pageId, blocks) {
   const url = `https://api.notion.com/v1/blocks/${pageId}/children`;
   return doNotion("patch", url, { headers, data: { children: blocks } });
 }
+
+// ─────────────────────────── Property Builder (shared) ───────────────────────────
+async function buildPropertyValue(props, headers, propName, value) {
+  const def = props[propName];
+  if (!def) return { skip: true, reason: "unknown_property" };
+  switch (def.type) {
+    case "title":
+      return { value: { title: [{ text: { content: String(value) } }] } };
+    case "rich_text":
+      return { value: { rich_text: [{ text: { content: String(value) } }] } };
+    case "status": {
+      const options = (def.status?.options || []).map(o => o.name);
+      const name = String(value);
+      const has = options.some(o => o.toLowerCase() === name.toLowerCase());
+      if (!has) return { skip: true, reason: "unknown_option", available: options };
+      return { value: { status: { name } } };
+    }
+    case "select": {
+      const options = (def.select?.options || []).map(o => o.name);
+      const name = String(value);
+      const has = options.some(o => o.toLowerCase() === name.toLowerCase());
+      if (!has) return { skip: true, reason: "unknown_option", available: options };
+      return { value: { select: { name } } };
+    }
+    case "multi_select": {
+      const options = (def.multi_select?.options || []).map(o => o.name);
+      const arr = Array.isArray(value) ? value : [value];
+      const valid = arr.filter(v => options.some(o => o.toLowerCase() === String(v).toLowerCase()));
+      if (!valid.length) return { skip: true, reason: "unknown_option", available: options };
+      return { value: { multi_select: valid.map(name => ({ name })) } };
+    }
+    case "date": {
+      if (typeof value === "string") return { value: { date: { start: value } } };
+      if (value && (value.start || value.end)) return { value: { date: { start: value.start, end: value.end, time_zone: value.time_zone } } };
+      return { skip: true, reason: "invalid_date" };
+    }
+    case "number":
+      if (typeof value !== "number") return { skip: true, reason: "invalid_number" };
+      return { value: { number: value } };
+    case "checkbox":
+      return { value: { checkbox: Boolean(value) } };
+    case "url":
+      return { value: { url: String(value) } };
+    case "people": {
+      const vals = Array.isArray(value) ? value : [value];
+      if (!globalThis.__solUsersIndex) globalThis.__solUsersIndex = await listAllUsers(headers);
+      const idx = globalThis.__solUsersIndex;
+      const people = [];
+      for (const v of vals) {
+        if (!v) continue;
+        if (typeof v === "string") {
+          const s = v.trim();
+          if (s.includes("@")) {
+            const u = idx.byEmail.get(s.toLowerCase());
+            if (u) people.push({ id: u.id });
+          } else {
+            people.push({ id: s });
+          }
+        } else if (v && v.id) {
+          people.push({ id: String(v.id) });
+        }
+      }
+      if (!people.length) return { skip: true, reason: "unknown_people" };
+      return { value: { people } };
+    }
+    case "files": {
+      const vals = Array.isArray(value) ? value : [value];
+      const files = [];
+      function inferNameFromUrl(u) {
+        try {
+          const withoutQuery = String(u).split("?")[0];
+          const seg = withoutQuery.split("/").filter(Boolean).pop() || "file";
+          return seg.length > 100 ? seg.slice(0, 100) : seg;
+        } catch { return "file"; }
+      }
+      for (const v of vals) {
+        if (!v) continue;
+        if (typeof v === "string") {
+          const urlStr = v.trim();
+          const name = inferNameFromUrl(urlStr);
+          files.push({ type: "external", name, external: { url: urlStr } });
+        } else if (typeof v === "object") {
+          if (v.external?.url) {
+            const name = v.name || inferNameFromUrl(v.external.url);
+            files.push({ type: "external", name, external: { url: v.external.url } });
+          } else if (v.url) {
+            const name = v.name || inferNameFromUrl(v.url);
+            files.push({ type: "external", name, external: { url: v.url } });
+          } else if (v.name && v.href) {
+            files.push({ type: "external", name: String(v.name), external: { url: String(v.href) } });
+          }
+        }
+      }
+      if (!files.length) return { skip: true, reason: "invalid_files" };
+      return { value: { files } };
+    }
+    case "relation": {
+      const ids = Array.isArray(value) ? value : [value];
+      const rel = ids
+        .map(v => (typeof v === "string" ? v.trim() : (v && v.id ? String(v.id) : null)))
+        .filter(Boolean)
+        .map(id => toDashedUuid(id));
+      if (!rel.length) return { skip: true, reason: "invalid_relation" };
+      return { value: { relation: rel } };
+    }
+    default:
+      return { skip: true, reason: "unsupported_type", type: def.type };
+  }
+}
+// Find pages with pagination, filters, and full properties
+app.post("/find_pages", requireSolAuth, async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    if (!NOTION_KEY || !targetDatabaseId) return res.status(200).json({ ok: true, simulating: true, db: dbSelector || "auto", database_id: targetDatabaseId || null });
+
+    const { page_size = 25, start_cursor, filter = {}, sort } = req.body || {};
+    const headers = notionHeaders();
+
+    // Build Notion filter dynamically (supports Status, Roadmap, Due date)
+    const dbSchema = await doNotion("get", `https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    const props = dbSchema.data?.properties || {};
+
+    function makeFilter(property, value) {
+      const def = props[property];
+      if (!def) return null;
+      switch (def.type) {
+        case "title":
+          return { property, title: { contains: String(value) } };
+        case "status":
+          return { property, status: { equals: String(value) } };
+        case "select":
+          return { property, select: { equals: String(value) } };
+        case "multi_select":
+          return { property, multi_select: { contains: String(value) } };
+        case "date": {
+          if (value && value.before) return { property, date: { before: value.before } };
+          if (value && value.after) return { property, date: { after: value.after } };
+          return null;
+        }
+        case "relation": {
+          const ids = Array.isArray(value) ? value : [value];
+          const relIds = ids.map(v => toDashedUuid(v));
+          return { property, relation: { contains: relIds[0] } }; // Notion supports "contains" for single match
+        }
+        default:
+          return null;
+      }
+    }
+
+    const notionFilter = [];
+    for (const [k, v] of Object.entries(filter || {})) {
+      const f = makeFilter(k, v);
+      if (f) notionFilter.push(f);
+    }
+
+    const queryPayload = {
+      page_size: Math.max(1, Math.min(100, Number(page_size) || 25)),
+      start_cursor: start_cursor || undefined,
+      filter: notionFilter.length ? { and: notionFilter } : undefined,
+      sorts: Array.isArray(sort) ? sort : undefined,
+    };
+
+    const resp = await doNotion("post", `https://api.notion.com/v1/databases/${targetDatabaseId}/query`, { headers, data: queryPayload });
+
+    // Map results with full properties and basic file extraction
+    function extractTitle(prop) {
+      const t = prop?.title || [];
+      return t.map(x => x?.plain_text || "").join("").trim();
+    }
+    function extractFiles(pageProps) {
+      const out = [];
+      for (const [k, def] of Object.entries(props)) {
+        if (def.type === "files" && pageProps[k]?.files) {
+          for (const f of pageProps[k].files) {
+            if (f.type === "external" && f.external?.url) out.push({ name: f.name || "file", url: f.external.url });
+            if (f.type === "file" && f.file?.url) out.push({ name: f.name || "file", url: f.file.url });
+          }
+        }
+      }
+      return out;
+    }
+
+    const results = (resp.data?.results || []).map(p => {
+      const properties = p.properties || {};
+      // also return a normalized title field for convenience
+      let titleKey = Object.keys(props).find(k => props[k].type === "title");
+      const title = titleKey ? extractTitle(properties[titleKey]) : null;
+      return {
+        id: p.id,
+        title,
+        properties,
+        files: extractFiles(properties),
+        last_edited_time: p.last_edited_time,
+        created_time: p.created_time
+      };
+    });
+
+    res.status(200).json({ ok: true, db: dbSelector || "auto", database_id: targetDatabaseId, has_more: resp.data?.has_more || false, next_cursor: resp.data?.next_cursor || null, results });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to find pages", status, details: data || err.message });
+  }
+});
+
+// Get full properties of a single page
+app.get("/get_page", requireSolAuth, async (req, res) => {
+  try {
+    const pageId = (req.query?.page_id || req.body?.page_id || "").toString().trim();
+    if (!NOTION_KEY || !pageId) return res.status(400).json({ ok: false, error: "missing_page_id" });
+    const headers = notionHeaders();
+    const resp = await doNotion("get", `https://api.notion.com/v1/pages/${pageId}`, { headers });
+    res.status(200).json({ ok: true, page_id: pageId, properties: resp.data?.properties || {}, archived: resp.data?.archived || false });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to get page", status, details: data || err.message });
+  }
+});
+
+// Export simple markdown of a page’s blocks
+app.get("/page_markdown", requireSolAuth, async (req, res) => {
+  try {
+    const pageId = (req.query?.page_id || "").toString().trim();
+    if (!NOTION_KEY || !pageId) return res.status(400).json({ ok: false, error: "missing_page_id" });
+    const headers = notionHeaders();
+    const children = await doNotion("get", `https://api.notion.com/v1/blocks/${pageId}/children`, { headers });
+    const lines = [];
+    for (const b of (children.data?.results || [])) {
+      const type = b.type;
+      const rt = b[type]?.rich_text || [];
+      const text = rt.map(x => x?.plain_text || "").join("");
+      if (type === "heading_1") lines.push(`# ${text}`);
+      else if (type === "heading_2") lines.push(`## ${text}`);
+      else if (type === "heading_3") lines.push(`### ${text}`);
+      else if (type === "to_do") lines.push(`- [${b[type]?.checked ? "x" : " "}] ${text}`);
+      else if (type === "bulleted_list_item") lines.push(`- ${text}`);
+      else if (type === "numbered_list_item") lines.push(`1. ${text}`);
+      else if (type === "paragraph") lines.push(text);
+      else if (type === "file") {
+        const f = b.file;
+        const url = f?.external?.url || f?.file?.url || null;
+        if (url) lines.push(`📎 ${url}`);
+      }
+    }
+    res.status(200).json({ ok: true, page_id: pageId, markdown: lines.join("\n") });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to export markdown", status, details: data || err.message });
+  }
+});
+
+// Append content and toggle to-dos
+app.post("/append_task_content", requireSolAuth, async (req, res) => {
+  try {
+    const pageId = (req.body?.page_id || "").toString().trim();
+    if (!NOTION_KEY || !pageId) return res.status(400).json({ ok: false, error: "missing_page_id" });
+    const headers = notionHeaders();
+
+    // Append new blocks first
+    const content = req.body?.content || null;
+    if (content) {
+      const blocks = buildBlocksFromContent(content);
+      if (blocks.length) await appendBlocks(headers, pageId, blocks);
+    }
+
+    // Toggle existing to-dos if requested: { toggles: [{ text: "...", checked: true }] }
+    if (Array.isArray(req.body?.toggles) && req.body.toggles.length) {
+      const children = await doNotion("get", `https://api.notion.com/v1/blocks/${pageId}/children`, { headers });
+      for (const t of req.body.toggles) {
+        const want = String(t.text || "").trim();
+        const setChecked = Boolean(t.checked);
+        if (!want) continue;
+        const target = (children.data?.results || []).find(b => b.type === "to_do" && (b.to_do?.rich_text || []).map(x => x?.plain_text || "").join("").trim() === want);
+        if (target) {
+          await doNotion("patch", `https://api.notion.com/v1/blocks/${target.id}`, { headers, data: { to_do: { checked: setChecked } } });
+        }
+      }
+    }
+
+    res.status(200).json({ ok: true, page_id: pageId });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to append/toggle content", status, details: data || err.message });
+  }
+});
+
+// Update fields (surgical property edits)
+app.post("/update_fields", requireSolAuth, async (req, res) => {
+  try {
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    const pageId = (req.body?.page_id || "").toString().trim();
+    const fields = req.body?.fields || req.body?.properties || {};
+    if (!NOTION_KEY || !targetDatabaseId || !pageId) return res.status(400).json({ ok: false, error: "missing_inputs" });
+
+    const headers = notionHeaders();
+    const schemaResp = await doNotion("get", `https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    const props = schemaResp.data?.properties || {};
+
+    const properties = {};
+    const skips = {};
+    for (const [k, v] of Object.entries(fields)) {
+      const built = await buildPropertyValue(props, headers, k, v);
+      if (built.skip) { skips[k] = built; continue; }
+      if (built.value) properties[k] = built.value;
+    }
+    if (!Object.keys(properties).length) return res.status(400).json({ ok: false, error: "no_valid_fields", skips });
+
+    const updateResp = await doNotion("patch", `https://api.notion.com/v1/pages/${pageId}`, { headers, data: { properties } });
+    res.status(200).json({ ok: true, page_id: updateResp.data?.id || pageId, skipped: Object.keys(skips).length ? skips : null });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to update fields", status, details: data || err.message });
+  }
+});
+
+// Lightweight memory note endpoint for Docs DB
+app.post("/memory_note", requireSolAuth, async (req, res) => {
+  try {
+    const title = (req.body?.title || "Sol Memory Note").toString();
+    const topic = (req.body?.topic || "general").toString();
+    const dbSelector = "docs";
+    const targetDatabaseId = getNotionDbId(dbSelector);
+    if (!NOTION_KEY || !targetDatabaseId) return res.status(400).json({ ok: false, error: "docs_db_not_configured" });
+
+    const headers = notionHeaders();
+    // Try to find existing by title
+    let pageId = await resolveTitleToId(targetDatabaseId, headers, title);
+
+    // Build properties
+    const schemaResp = await doNotion("get", `https://api.notion.com/v1/databases/${targetDatabaseId}`, { headers });
+    const props = schemaResp.data?.properties || {};
+    let titleProp = Object.keys(props).find(k => props[k].type === "title");
+    if (!titleProp) return res.status(400).json({ ok: false, error: "docs_db_missing_title" });
+    const properties = { [titleProp]: { title: [{ text: { content: title } }] } };
+
+    if (!pageId) {
+      const createResp = await doNotion("post", "https://api.notion.com/v1/pages", { headers, data: { parent: { database_id: targetDatabaseId }, properties } });
+      pageId = createResp.data.id;
+    } else {
+      await doNotion("patch", `https://api.notion.com/v1/pages/${pageId}`, { headers, data: { properties } });
+    }
+
+    const content = req.body?.content || { description: `Memory topic: ${topic}` };
+    const blocks = buildBlocksFromContent(content);
+    if (blocks.length) await appendBlocks(headers, pageId, blocks);
+
+    res.status(200).json({ ok: true, page_id: pageId, title });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    res.status(500).json({ ok: false, error: "Failed to write memory note", status, details: data || err.message });
+  }
+});
 
 
 // ─────────────────────────── Request Logging (debug) ───────────────────────────
