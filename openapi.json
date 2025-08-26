@@ -1,0 +1,82 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Sol v3 Agent",
+    "version": "v3.3.0",
+    "description": "CareerStream Notion Agent — query/update Notion pages, manage memory, generate files, and run utility operations."
+  },
+  "servers": [
+    { "url": "https://sol-v3-agent.onrender.com" }
+  ],
+  "security": [
+    { "solToken": [] }
+  ],
+  "components": {
+    "securitySchemes": {
+      "solToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-sol-token",
+        "description": "Server token required for write calls."
+      }
+    },
+    "schemas": {
+      "Content": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string" },
+          "files": {
+            "type": "array",
+            "items": { "oneOf": [ { "type": "string" }, { "type": "object", "additionalProperties": true } ] }
+          },
+          "subtasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": { "text": { "type": "string" }, "checked": { "type": "boolean" } },
+              "required": ["text"]
+            }
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string" },
+                "text": { "type": "string" },
+                "language": { "type": "string" },
+                "icon": { "type": "string" }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "paths": {
+    "/health": { "get": { "operationId": "health", "summary": "Health check", "responses": { "200": { "description": "OK" } } } },
+    "/whoami": { "get": { "operationId": "whoami", "summary": "Echo headers", "responses": { "200": { "description": "OK" } } } },
+    "/find_pages": { "post": { "operationId": "findPages", "summary": "Query Notion database", "responses": { "200": { "description": "OK" } } } },
+    "/get_page": { "get": { "operationId": "getPage", "summary": "Fetch page properties", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
+    "/page_blocks": { "get": { "operationId": "pageBlocks", "summary": "Fetch block tree", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
+    "/page_markdown": { "get": { "operationId": "pageMarkdown", "summary": "Export page to Markdown", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
+    "/append_task_content": { "post": { "operationId": "appendTaskContent", "summary": "Append content", "responses": { "200": { "description": "OK" } } } },
+    "/replace_page_content": { "post": { "operationId": "replacePageContent", "summary": "Replace all blocks", "responses": { "200": { "description": "OK" } } } },
+    "/upsert_page": { "post": { "operationId": "upsertPage", "summary": "Create/update page", "responses": { "200": { "description": "OK" } } } },
+    "/update_fields": { "post": { "operationId": "updateFields", "summary": "Update page fields", "responses": { "200": { "description": "OK" } } } },
+    "/batch_update_fields": { "post": { "operationId": "batchUpdateFields", "summary": "Batch update fields", "responses": { "200": { "description": "OK" } } } },
+    "/memory_note": { "post": { "operationId": "memoryNote", "summary": "Write a memory note", "responses": { "200": { "description": "OK" } } } },
+    "/memory_notes": { "get": { "operationId": "memoryNotes", "summary": "Retrieve memory notes", "parameters": [ { "in": "query", "name": "topic", "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
+    "/memory_pack_export": { "get": { "operationId": "memoryPackExport", "summary": "Export memory notes", "parameters": [ { "in": "query", "name": "topic", "schema": { "type": "string" } }, { "in": "query", "name": "format", "schema": { "type": "string", "enum": ["docx","md"], "default": "docx" } } ], "responses": { "200": { "description": "OK" } } } },
+    "/memory_delete": { "post": { "operationId": "memoryDelete", "summary": "Delete a memory note", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "page_id": { "type": "string" } }, "required": ["page_id"] } } } }, "responses": { "200": { "description": "OK" } } } },
+    "/generate_document": { "post": { "operationId": "generateDocument", "summary": "Generate a document", "responses": { "200": { "description": "OK" } } } },
+    "/delete_page": { "post": { "operationId": "deletePage", "summary": "Delete (archive) page", "responses": { "200": { "description": "OK" } } } },
+    "/notion_schema": { "get": { "operationId": "notionSchema", "summary": "Get DB schema", "responses": { "200": { "description": "OK" } } } },
+    "/notion_raw_props": { "get": { "operationId": "notionRawProps", "summary": "Get raw DB props", "responses": { "200": { "description": "OK" } } } },
+    "/notion_users": { "get": { "operationId": "notionUsers", "summary": "List Notion users", "responses": { "200": { "description": "OK" } } } },
+    "/notion_test_create": { "post": { "operationId": "notionTestCreate", "summary": "Create test page", "responses": { "200": { "description": "OK" } } } },
+    "/search_web": { "post": { "operationId": "searchWeb", "summary": "Search the web", "responses": { "200": { "description": "OK" } } } }
+  }
+}

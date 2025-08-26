@@ -515,6 +515,24 @@ app.get("/memory_pack_export", requireSolAuth, async (req, res) => {
   }
 });
 
+// Memory delete
+app.post("/memory_delete", requireSolAuth, async (req, res) => {
+  try {
+    const { page_id } = req.body;
+    if (!page_id) return res.status(400).json({ ok: false, error: "missing_page_id" });
+
+    const headers = notionHeaders();
+    await doNotion("patch", `https://api.notion.com/v1/pages/${page_id}`, {
+      headers,
+      data: { archived: true }
+    });
+
+    res.json({ ok: true, page_id, deleted: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Generate document
 app.post("/generate_document", requireSolAuth, async (req, res) => {
   try {
