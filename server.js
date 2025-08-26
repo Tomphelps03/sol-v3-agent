@@ -570,6 +570,19 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
     const title = req.body?.title;
     const fields = req.body?.fields || req.body?.properties || {};
 
+    // Shim: allow properties to ride inside content.meta (to bypass strict action validators)
+    // If present, merge content.meta → fields unless key already provided explicitly.
+    const __incomingContent = req.body?.content || null;
+    if (__incomingContent && __incomingContent.meta && typeof __incomingContent.meta === "object") {
+      try {
+        for (const [mk, mv] of Object.entries(__incomingContent.meta)) {
+          if (fields[mk] === undefined) {
+            fields[mk] = mv;
+          }
+        }
+      } catch (_) { /* ignore meta merge errors */ }
+    }
+
     if (!NOTION_KEY || !targetDatabaseId) {
       return res.status(200).json({
         ok: true, simulating: true, db: dbSelector || "auto",
@@ -824,10 +837,9 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
       }
     }
 
-    const content = req.body?.content || null;
     async function maybeAppendContent(targetPageId) {
-      if (!content) return null;
-      const blocks = buildBlocksFromContent(content);
+      if (!__incomingContent) return null;
+      const blocks = buildBlocksFromContent(__incomingContent);
       if (!blocks.length) return null;
       return appendBlocks(notionHeaders(), targetPageId, blocks);
     }
