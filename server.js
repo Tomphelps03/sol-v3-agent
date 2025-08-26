@@ -292,7 +292,7 @@ app.post("/replace_page_content", requireSolAuth, async (req, res) => {
 // Upsert page
 app.post("/upsert_page", requireSolAuth, async (req, res) => {
   try {
-    const { db, page_id, title, fields, properties, content } = req.body || {};
+    const { db, page_id, title, fields, properties, content, ...rest } = req.body || {};
     const dbId = getDbId(db);
     const headers = notionHeaders();
 
@@ -305,7 +305,8 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
       if (titleKey) data.properties[titleKey] = { title: [{ text: { content: title } }] };
     }
 
-    const f = fields || properties || {};
+    // Accept fields, properties, or top-level keys
+    const f = fields || properties || rest || {};
     for (const [k, v] of Object.entries(f)) {
       data.properties[k] = { rich_text: [{ text: { content: String(v) } }] };
     }
@@ -360,14 +361,16 @@ async function buildPropertyValue(props, headers, key, value) {
 // Update fields
 app.post("/update_fields", requireSolAuth, async (req, res) => {
   try {
-    const { db, page_id, fields, properties } = req.body;
+    const { db, page_id, fields, properties, ...rest } = req.body;
     const dbId = getDbId(db);
     const headers = notionHeaders();
+
     const schemaResp = await doNotion("get", `https://api.notion.com/v1/databases/${dbId}`, { headers });
     const props = schemaResp.data?.properties || {};
 
-    const updates = fields || properties || {};
+    const updates = fields || properties || rest || {};
     const propertiesPayload = {};
+
     for (const [k, v] of Object.entries(updates)) {
       const built = await buildPropertyValue(props, headers, k, v);
       if (built.value) propertiesPayload[k] = built.value;
@@ -390,18 +393,23 @@ app.post("/batch_update_fields", requireSolAuth, async (req, res) => {
     const { db, updates } = req.body;
     const dbId = getDbId(db);
     const headers = notionHeaders();
+
     const schemaResp = await doNotion("get", `https://api.notion.com/v1/databases/${dbId}`, { headers });
     const props = schemaResp.data?.properties || {};
 
     const results = [];
+
     for (const u of updates) {
       const pageId = u.page_id;
-      const f = u.fields || u.properties || {};
+      const { fields, properties, ...rest } = u;
+      const f = fields || properties || rest || {};
+
       const propertiesPayload = {};
       for (const [k, v] of Object.entries(f)) {
         const built = await buildPropertyValue(props, headers, k, v);
         if (built.value) propertiesPayload[k] = built.value;
       }
+
       if (Object.keys(propertiesPayload).length) {
         await doNotion("patch", `https://api.notion.com/v1/pages/${pageId}`, {
           headers,
