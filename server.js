@@ -15,6 +15,29 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(bodyParser.json());
 
+// ─────────────────────────── Request Logging ───────────────────────────
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`,
+      Object.keys(req.body || {}).length ? req.body : ""
+    );
+  });
+
+  res.on("error", (err) => {
+    const duration = Date.now() - start;
+    console.error(
+      `[${new Date().toISOString()}] ERROR ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`,
+      err.stack || err
+    );
+  });
+
+  next();
+});
+
 // Files dir
 const filesDir = path.join(process.cwd(), "public", "files");
 fs.mkdirSync(filesDir, { recursive: true });
@@ -208,7 +231,8 @@ app.post("/find_pages", requireSolAuth, async (req, res) => {
       next_cursor: resp.data?.next_cursor,
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -220,7 +244,8 @@ app.get("/get_page", requireSolAuth, async (req, res) => {
     const resp = await doNotion("get", `https://api.notion.com/v1/pages/${pageId}`, { headers });
     res.json({ ok: true, page_id: pageId, properties: resp.data?.properties });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -232,7 +257,8 @@ app.get("/page_blocks", requireSolAuth, async (req, res) => {
     const resp = await doNotion("get", `https://api.notion.com/v1/blocks/${pageId}/children`, { headers });
     res.json({ ok: true, page_id: pageId, blocks: resp.data?.results });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -255,7 +281,8 @@ app.get("/page_markdown", requireSolAuth, async (req, res) => {
     }
     res.json({ ok: true, page_id: pageId, markdown: lines.join("\n") });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -268,7 +295,8 @@ app.post("/append_task_content", requireSolAuth, async (req, res) => {
     if (blocks.length) await appendBlocks(headers, page_id, blocks);
     res.json({ ok: true, page_id, appended: blocks.length });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -285,7 +313,8 @@ app.post("/replace_page_content", requireSolAuth, async (req, res) => {
     if (blocks.length) await appendBlocks(headers, page_id, blocks);
     res.json({ ok: true, page_id, replaced: blocks.length });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -325,7 +354,8 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, page_id: resp.data.id, mode: page_id ? "update" : "create" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -383,7 +413,8 @@ app.post("/update_fields", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, page_id, updated: Object.keys(propertiesPayload) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -421,7 +452,8 @@ app.post("/batch_update_fields", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, results });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -454,7 +486,8 @@ app.post("/memory_note", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, page_id: resp.data.id });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -470,7 +503,8 @@ app.get("/memory_notes", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, results: resp.data?.results || [] });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -519,7 +553,8 @@ app.get("/memory_pack_export", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, count: items.length, format, doc_url: url });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -537,7 +572,8 @@ app.post("/memory_delete", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, page_id, deleted: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -575,7 +611,8 @@ app.post("/generate_document", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, title, format, doc_url: url });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -593,7 +630,8 @@ app.post("/delete_page", requireSolAuth, async (req, res) => {
 
     res.json({ ok: true, page_id, deleted: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -605,7 +643,8 @@ app.get("/notion_schema", requireSolAuth, async (req, res) => {
     const resp = await doNotion("get", `https://api.notion.com/v1/databases/${dbId}`, { headers });
     res.json({ ok: true, db: req.query.db, schema: resp.data?.properties });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -617,7 +656,8 @@ app.get("/notion_raw_props", requireSolAuth, async (req, res) => {
     const resp = await doNotion("get", `https://api.notion.com/v1/databases/${dbId}`, { headers });
     res.json({ ok: true, raw: resp.data?.properties });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -628,7 +668,8 @@ app.get("/notion_users", requireSolAuth, async (req, res) => {
     const resp = await doNotion("get", `https://api.notion.com/v1/users`, { headers });
     res.json({ ok: true, users: resp.data?.results || [] });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -648,7 +689,8 @@ app.post("/notion_test_create", requireSolAuth, async (req, res) => {
     const resp = await doNotion("post", `https://api.notion.com/v1/pages`, { headers, data });
     res.json({ ok: true, db, page_id: resp.data.id, title: title || "Sol v3 Health Check" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -660,7 +702,8 @@ app.post("/search_web", async (req, res) => {
     // Here you’d implement a real search API if you connect one
     res.json({ ok: true, simulating: true, query, recency_days, results: [] });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  console.error(`[ERROR] ${req.method} ${req.url}`, e.response?.data || e);
+  res.status(500).json({ ok: false, error: e.message });
   }
 });
 
