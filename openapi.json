@@ -1,82 +1,406 @@
 {
-  "openapi": "3.1.0",
+  "openapi": "3.1.1",
   "info": {
     "title": "Sol v3 Agent",
-    "version": "v3.3.0",
-    "description": "CareerStream Notion Agent — query/update Notion pages, manage memory, generate files, and run utility operations."
+    "version": "1.0.4"
   },
   "servers": [
     { "url": "https://sol-v3-agent.onrender.com" }
   ],
-  "security": [
-    { "solToken": [] }
-  ],
-  "components": {
-    "securitySchemes": {
-      "solToken": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "x-sol-token",
-        "description": "Server token required for write calls."
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "responses": { "200": { "description": "Service health" } }
       }
     },
-    "schemas": {
-      "Content": {
-        "type": "object",
-        "properties": {
-          "description": { "type": "string" },
-          "files": {
-            "type": "array",
-            "items": { "oneOf": [ { "type": "string" }, { "type": "object", "additionalProperties": true } ] }
-          },
-          "subtasks": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": { "text": { "type": "string" }, "checked": { "type": "boolean" } },
-              "required": ["text"]
-            }
-          },
-          "blocks": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": { "type": "string" },
-                "text": { "type": "string" },
-                "language": { "type": "string" },
-                "icon": { "type": "string" }
-              },
-              "additionalProperties": true
+    "/whoami": {
+      "get": {
+        "operationId": "whoami",
+        "responses": { "200": { "description": "Identity info" } }
+      }
+    },
+    "/find_pages": {
+      "post": {
+        "operationId": "find_pages",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
+                  "page_size": { "type": "integer" },
+                  "start_cursor": { "type": "string" },
+                  "filter": { "type": "object" },
+                  "sort": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["db"]
+              }
             }
           }
         },
-        "additionalProperties": true
+        "responses": { "200": { "description": "Query pages" } }
+      }
+    },
+    "/get_page": {
+      "get": {
+        "operationId": "get_page",
+        "parameters": [
+          { "in": "query", "name": "page_id", "schema": { "type": "string" }, "required": true }
+        ],
+        "responses": { "200": { "description": "Page properties" } }
+      }
+    },
+    "/page_blocks": {
+      "get": {
+        "operationId": "page_blocks",
+        "parameters": [
+          { "in": "query", "name": "page_id", "schema": { "type": "string" }, "required": true }
+        ],
+        "responses": { "200": { "description": "Block children" } }
+      }
+    },
+    "/page_markdown": {
+      "get": {
+        "operationId": "page_markdown",
+        "parameters": [
+          { "in": "query", "name": "page_id", "schema": { "type": "string" }, "required": true }
+        ],
+        "responses": { "200": { "description": "Markdown content" } }
+      }
+    },
+    "/upsert_page": {
+      "post": {
+        "operationId": "upsert_page",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
+                  "page_id": { "type": "string" },
+                  "title": { "type": "string" },
+                  "content": {
+                    "type": "object",
+                    "properties": {
+                      "description": { "type": "string" },
+                      "files": { "type": "array", "items": { "type": "string" } },
+                      "subtasks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "text": { "type": "string" },
+                            "checked": { "type": "boolean" }
+                          }
+                        }
+                      },
+                      "blocks": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                },
+                "additionalProperties": true,
+                "required": ["db"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Upserted page" } }
+      }
+    },
+    "/append_task_content": {
+      "post": {
+        "operationId": "append_task_content",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "page_id": { "type": "string" },
+                  "content": {
+                    "type": "object",
+                    "properties": {
+                      "description": { "type": "string" },
+                      "files": { "type": "array", "items": { "type": "string" } },
+                      "subtasks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "text": { "type": "string" },
+                            "checked": { "type": "boolean" }
+                          }
+                        }
+                      },
+                      "blocks": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                },
+                "required": ["page_id"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Appended content" } }
+      }
+    },
+    "/replace_page_content": {
+      "post": {
+        "operationId": "replace_page_content",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "page_id": { "type": "string" },
+                  "content": {
+                    "type": "object",
+                    "properties": {
+                      "description": { "type": "string" },
+                      "files": { "type": "array", "items": { "type": "string" } },
+                      "subtasks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "text": { "type": "string" },
+                            "checked": { "type": "boolean" }
+                          }
+                        }
+                      },
+                      "blocks": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                },
+                "required": ["page_id"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Replaced content" } }
+      }
+    },
+    "/delete_page": {
+      "post": {
+        "operationId": "delete_page",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "page_id": { "type": "string" }
+                },
+                "required": ["page_id"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Deleted page" } }
+      }
+    },
+    "/update_fields": {
+      "post": {
+        "operationId": "update_fields",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
+                  "page_id": { "type": "string" }
+                },
+                "additionalProperties": true,
+                "required": ["db", "page_id"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Updated fields" } }
+      }
+    },
+    "/batch_update_fields": {
+      "post": {
+        "operationId": "batch_update_fields",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
+                  "updates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "page_id": { "type": "string" }
+                      },
+                      "additionalProperties": true,
+                      "required": ["page_id"]
+                    }
+                  }
+                },
+                "required": ["db", "updates"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Batch updated fields" } }
+      }
+    },
+    "/generate_document": {
+      "post": {
+        "operationId": "generate_document",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "content": { "type": "string" },
+                  "format": { "type": "string", "enum": ["docx", "pptx", "pdf", "md"] }
+                },
+                "required": ["title", "content", "format"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Generated document" } }
+      }
+    },
+    "/notion_schema": {
+      "get": {
+        "operationId": "get_notion_schema",
+        "parameters": [
+          { "in": "query", "name": "db", "schema": { "type": "string", "enum": ["docs", "roadmap", "tasks"] }, "required": true }
+        ],
+        "responses": { "200": { "description": "Database schema" } }
+      }
+    },
+    "/notion_users": {
+      "get": {
+        "operationId": "list_notion_users",
+        "responses": { "200": { "description": "List users" } }
+      }
+    },
+    "/notion_test_create": {
+      "post": {
+        "operationId": "notion_test_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
+                  "title": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Test create" } }
+      }
+    },
+    "/memory_note": {
+      "post": {
+        "operationId": "memory_note",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "topic": { "type": "string" },
+                  "content": {
+                    "type": "object",
+                    "properties": {
+                      "description": { "type": "string" },
+                      "files": { "type": "array", "items": { "type": "string" } },
+                      "subtasks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "text": { "type": "string" },
+                            "checked": { "type": "boolean" }
+                          }
+                        }
+                      },
+                      "blocks": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Memory note created" } }
+      }
+    },
+    "/memory_notes": {
+      "get": {
+        "operationId": "memory_notes",
+        "parameters": [
+          { "in": "query", "name": "topic", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "List memory notes" } }
+      }
+    },
+    "/memory_delete": {
+      "post": {
+        "operationId": "memory_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "page_id": { "type": "string" } },
+                "required": ["page_id"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Memory deleted" } }
+      }
+    },
+    "/memory_pack_export": {
+      "get": {
+        "operationId": "memory_pack_export",
+        "parameters": [
+          { "in": "query", "name": "topic", "schema": { "type": "string" } },
+          { "in": "query", "name": "format", "schema": { "type": "string", "enum": ["docx", "md"] } }
+        ],
+        "responses": { "200": { "description": "Exported memory pack" } }
+      }
+    },
+    "/search_web": {
+      "post": {
+        "operationId": "search_web",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": { "type": "string" },
+                  "recency_days": { "type": "integer" }
+                },
+                "required": ["query"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Search results" } }
       }
     }
-  },
-  "paths": {
-    "/health": { "get": { "operationId": "health", "summary": "Health check", "responses": { "200": { "description": "OK" } } } },
-    "/whoami": { "get": { "operationId": "whoami", "summary": "Echo headers", "responses": { "200": { "description": "OK" } } } },
-    "/find_pages": { "post": { "operationId": "find_pages", "summary": "Query Notion database", "responses": { "200": { "description": "OK" } } } },
-    "/get_page": { "get": { "operationId": "get_page", "summary": "Fetch page properties", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
-    "/page_blocks": { "get": { "operationId": "page_blocks", "summary": "Fetch block tree", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
-    "/page_markdown": { "get": { "operationId": "page_markdown", "summary": "Export page to Markdown", "parameters": [ { "in": "query", "name": "page_id", "required": true, "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
-    "/append_task_content": { "post": { "operationId": "append_task_content", "summary": "Append content", "responses": { "200": { "description": "OK" } } } },
-    "/replace_page_content": { "post": { "operationId": "replace_page_content", "summary": "Replace all blocks", "responses": { "200": { "description": "OK" } } } },
-    "/upsert_page": { "post": { "operationId": "upsert_page", "summary": "Create/update page", "responses": { "200": { "description": "OK" } } } },
-    "/update_fields": { "post": { "operationId": "update_fields", "summary": "Update page fields", "responses": { "200": { "description": "OK" } } } },
-    "/batch_update_fields": { "post": { "operationId": "batch_update_fields", "summary": "Batch update fields", "responses": { "200": { "description": "OK" } } } },
-    "/memory_note": { "post": { "operationId": "memory_mote", "summary": "Write a memory note", "responses": { "200": { "description": "OK" } } } },
-    "/memory_notes": { "get": { "operationId": "memory_notes", "summary": "Retrieve memory notes", "parameters": [ { "in": "query", "name": "topic", "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
-    "/memory_pack_export": { "get": { "operationId": "memory_pack_export", "summary": "Export memory notes", "parameters": [ { "in": "query", "name": "topic", "schema": { "type": "string" } }, { "in": "query", "name": "format", "schema": { "type": "string", "enum": ["docx","md"], "default": "docx" } } ], "responses": { "200": { "description": "OK" } } } },
-    "/memory_delete": { "post": { "operationId": "memory_delete", "summary": "Delete a memory note", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "page_id": { "type": "string" } }, "required": ["page_id"] } } } }, "responses": { "200": { "description": "OK" } } } },
-    "/generate_document": { "post": { "operationId": "generate_document", "summary": "Generate a document", "responses": { "200": { "description": "OK" } } } },
-    "/delete_page": { "post": { "operationId": "delete_page", "summary": "Delete (archive) page", "responses": { "200": { "description": "OK" } } } },
-    "/notion_schema": { "get": { "operationId": "notion_schema", "summary": "Get DB schema", "responses": { "200": { "description": "OK" } } } },
-    "/notion_raw_props": { "get": { "operationId": "notion_raw_props", "summary": "Get raw DB props", "responses": { "200": { "description": "OK" } } } },
-    "/notion_users": { "get": { "operationId": "notion_users", "summary": "List Notion users", "responses": { "200": { "description": "OK" } } } },
-    "/notion_test_create": { "post": { "operationId": "notion_test_create", "summary": "Create test page", "responses": { "200": { "description": "OK" } } } },
-    "/search_web": { "post": { "operationId": "search_web", "summary": "Search the web", "responses": { "200": { "description": "OK" } } } }
   }
 }
