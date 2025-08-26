@@ -656,6 +656,11 @@ app.post("/search_web", async (req, res) => {
   }
 });
 
+// Serve OpenAPI schema directly
+app.get("/openapi.json", (req, res) => {
+  res.sendFile(path.join(process.cwd(), "openapi.json"));
+});
+
 // ─────────────────────────── Boot ───────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 Sol v3 agent v${VERSION} running at http://localhost:${PORT}`);
