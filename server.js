@@ -882,6 +882,73 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
   }
 });
 
+// Archive (delete) a Notion page by page_id or by db+title
+app.post("/delete_page", requireSolAuth, async (req, res) => {
+  try {
+    // Prefer explicit page_id; otherwise resolve via db+title
+    let pageId = (req.body?.page_id || "").toString().trim() || null;
+    const dbSelector = (req.query?.db || req.body?.db || "").toString().toLowerCase();
+    const title = (req.body?.title || "").toString().trim() || null;
+    const dryRun = Boolean(req.body?.dry_run);
+    const reason = (req.body?.reason || "").toString();
+
+    const targetDatabaseId = getNotionDbId(dbSelector);
+
+    if (!NOTION_KEY) {
+      return res.status(200).json({
+        ok: true,
+        simulating: true,
+        note: "Provide NOTION_KEY to perform archive operations.",
+        page_id: pageId || null,
+        db: dbSelector || "auto",
+        title: title || null,
+        dry_run: dryRun
+      });
+    }
+
+    const headers = notionHeaders();
+
+    // Resolve by db+title if no page_id provided
+    if (!pageId) {
+      if (!targetDatabaseId || !title) {
+        return res.status(400).json({ ok: false, error: "missing_identifier", hint: "Provide 'page_id' or ('db' and exact 'title')." });
+      }
+      const resolved = await resolveTitleToId(targetDatabaseId, headers, title);
+      if (!resolved) {
+        return res.status(404).json({ ok: false, error: "not_found", hint: `No page titled '${title}' found in the selected database.` });
+      }
+      pageId = resolved;
+    }
+
+    if (dryRun) {
+      return res.status(200).json({
+        ok: true,
+        dry_run: true,
+        action: "archive",
+        page_id: pageId,
+        reason: reason || null
+      });
+    }
+
+    // Archive the page (safe delete)
+    const resp = await doNotion("patch", `https://api.notion.com/v1/pages/${pageId}`, {
+      headers,
+      data: { archived: true }
+    });
+
+    return res.status(200).json({
+      ok: true,
+      archived: true,
+      page_id: resp.data?.id || pageId,
+      reason: reason || null
+    });
+  } catch (err) {
+    const status = err?.response?.status; const data = err?.response?.data;
+    console.error("Notion delete (archive) failed:", status, data || err.message);
+    res.status(500).json({ ok: false, error: "Failed to archive page", status, details: data || err.message });
+  }
+});
+
 // Web search (optional; simulated without key)
 app.post("/search_web", async (req, res) => {
   try {
