@@ -466,6 +466,55 @@ app.get("/memory_notes", requireSolAuth, async (req, res) => {
   }
 });
 
+// Memory pack export
+app.get("/memory_pack_export", requireSolAuth, async (req, res) => {
+  try {
+    const dbId = getDbId("docs");
+    const headers = notionHeaders();
+    const { topic, format = "docx" } = req.query;
+
+    // Query notes
+    const filter = topic ? { filter: { property: "Topic", rich_text: { contains: topic } } } : {};
+    const resp = await doNotion("post", `https://api.notion.com/v1/databases/${dbId}/query`, { headers, data: filter });
+    const notes = resp.data?.results || [];
+
+    // Extract plain text
+    const items = notes.map((n) => {
+      const title = Object.values(n.properties)
+        .find((x) => x.type === "title")
+        ?.title?.map((t) => t.plain_text)
+        .join("") || "Untitled";
+      return `## ${title}`;
+    });
+
+    if (!items.length) return res.json({ ok: true, count: 0, message: "No memory notes found" });
+
+    const safe = safeName(topic ? `memory_pack_${topic}` : "memory_pack_all");
+    const filePath = filePathFor(`${safe}.${format}`);
+    const url = makePublicURL(req, `${safe}.${format}`);
+
+    if (format === "docx") {
+      const doc = new Document({
+        sections: [
+          {
+            children: items.map((t) => new Paragraph({ children: [new TextRun(t)] })),
+          },
+        ],
+      });
+      const buffer = await Packer.toBuffer(doc);
+      fs.writeFileSync(filePath, buffer);
+    } else if (format === "md") {
+      fs.writeFileSync(filePath, items.join("\n\n"));
+    } else {
+      return res.status(400).json({ ok: false, error: "unsupported_format" });
+    }
+
+    res.json({ ok: true, count: items.length, format, doc_url: url });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Generate document
 app.post("/generate_document", requireSolAuth, async (req, res) => {
   try {
