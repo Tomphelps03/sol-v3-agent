@@ -568,7 +568,7 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
     const targetDatabaseId = getNotionDbId(dbSelector);
     const pageId = (req.body?.page_id || "").toString().trim() || null;
     const title = req.body?.title;
-    const fields = req.body?.fields || {};
+    const fields = req.body?.fields || req.body?.properties || {};
 
     if (!NOTION_KEY || !targetDatabaseId) {
       return res.status(200).json({
@@ -796,6 +796,10 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
 
     const properties = {};
     const skips = {};
+    if (process.env.SOL_DEBUG === "1") {
+      try { console.log("upsert_page: incoming keys", Object.keys(req.body || {})); } catch {}
+      try { console.log("upsert_page: field keys", Object.keys(fields || {})); } catch {}
+    }
     for (const [k, v] of Object.entries(normalizedFields)) {
       const built = await buildProp(k, v);
       if (built.error) {
@@ -813,7 +817,7 @@ app.post("/upsert_page", requireSolAuth, async (req, res) => {
       let titlePropName = null;
       for (const [k, v] of Object.entries(props)) { if (v.type === "title") { titlePropName = k; break; } }
       if (!title && !properties[titlePropName]) {
-        return res.status(400).json({ ok: false, error: "title_required_on_create", hint: `Provide 'title' or set the '${titlePropName || "title"}' field in 'fields'.` });
+        return res.status(400).json({ ok: false, error: "title_required_on_create", hint: `Provide 'title' or set the '${titlePropName || "title"}' property inside 'fields' (or 'properties').` });
       }
       if (title && titlePropName && !properties[titlePropName]) {
         properties[titlePropName] = { title: [{ text: { content: String(title) } }] };
