@@ -2,7 +2,7 @@
   "openapi": "3.1.1",
   "info": {
     "title": "Sol v3 Agent",
-    "version": "1.0.4"
+    "version": "1.0.5"
   },
   "servers": [
     { "url": "https://sol-v3-agent.onrender.com" }
@@ -82,6 +82,7 @@
                   "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
                   "page_id": { "type": "string" },
                   "title": { "type": "string" },
+                  "fields": { "type": "object", "additionalProperties": true },
                   "content": {
                     "type": "object",
                     "properties": {
@@ -101,7 +102,6 @@
                     }
                   }
                 },
-                "additionalProperties": true,
                 "required": ["db"]
               }
             }
@@ -213,9 +213,9 @@
                 "type": "object",
                 "properties": {
                   "db": { "type": "string", "enum": ["docs", "roadmap", "tasks"] },
-                  "page_id": { "type": "string" }
+                  "page_id": { "type": "string" },
+                  "fields": { "type": "object", "additionalProperties": true }
                 },
-                "additionalProperties": true,
                 "required": ["db", "page_id"]
               }
             }
@@ -239,9 +239,9 @@
                     "items": {
                       "type": "object",
                       "properties": {
-                        "page_id": { "type": "string" }
+                        "page_id": { "type": "string" },
+                        "fields": { "type": "object", "additionalProperties": true }
                       },
-                      "additionalProperties": true,
                       "required": ["page_id"]
                     }
                   }
