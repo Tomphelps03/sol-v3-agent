@@ -65,7 +65,7 @@
     "/append_task_content": { "post": { "operationId": "appendTaskContent", "summary": "Append content", "responses": { "200": { "description": "OK" } } } },
     "/replace_page_content": { "post": { "operationId": "replacePageContent", "summary": "Replace all blocks", "responses": { "200": { "description": "OK" } } } },
     "/upsert_page": { "post": { "operationId": "upsertPage", "summary": "Create/update page", "responses": { "200": { "description": "OK" } } } },
-    "/update_fields": { "post": { "operationId": "updateFields", "summary": "Update page fields", "responses": { "200": { "description": "OK" } } } },
+    "/update_fields": { "post": { "operationId": "update_fields", "summary": "Update page fields", "responses": { "200": { "description": "OK" } } } },
     "/batch_update_fields": { "post": { "operationId": "batchUpdateFields", "summary": "Batch update fields", "responses": { "200": { "description": "OK" } } } },
     "/memory_note": { "post": { "operationId": "memoryNote", "summary": "Write a memory note", "responses": { "200": { "description": "OK" } } } },
     "/memory_notes": { "get": { "operationId": "memoryNotes", "summary": "Retrieve memory notes", "parameters": [ { "in": "query", "name": "topic", "schema": { "type": "string" } } ], "responses": { "200": { "description": "OK" } } } },
